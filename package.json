@@ -1,0 +1,30 @@
+{
+  "name": "ai-counselor-line-bot",
+  "version": "1.0.0",
+  "description": "LINE AI相談bot - MVP版",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^8.0.0",
+    "express": "^4.18.2",
+    "openai": "^4.20.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "line",
+    "bot",
+    "ai",
+    "counseling",
+    "openai"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
