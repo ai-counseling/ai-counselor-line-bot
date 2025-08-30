@@ -491,105 +491,177 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
   try {
     const events = JSON.parse(req.body.toString()).events;
     
+    // 即座にLINEに200応答（重要：タイムアウト防止）
+    res.status(200).send('OK');
+    
     await Promise.all(events.map(async (event) => {
-      // テキストメッセージのみ処理
-      if (event.type !== 'message' || event.message.type !== 'text') {
-        return;
-      }
+      try {
+        // テキストメッセージのみ処理
+        if (event.type !== 'message' || event.message.type !== 'text') {
+          return;
+        }
 
-    const userId = event.source.userId;
-    const userMessage = event.message.text.trim();
-    
-    // 🎲 ABテストグループ初期化
-    const abGroup = initializeABTestUser(userId);
-    
-    // 📊 メトリクス記録
-    recordABTestMetric(userId, 'totalTurns');
-    
-    console.log(`📱 User ${userId.slice(0, 8)}*** (AB:${abGroup}): ${userMessage}`);
+        const userId = event.source.userId;
+        const userMessage = event.message.text.trim();
+        
+        // 処理開始ログ
+        console.log(`📱 Processing message from: ${userId.slice(0, 8)}*** - "${userMessage}"`);
+        
+        // ABテストグループ初期化
+        const abGroup = initializeABTestUser(userId);
+        recordABTestMetric(userId, 'totalTurns');
+        
+        console.log(`🎲 User ${userId.slice(0, 8)}*** assigned to Group: ${abGroup}`);
 
-      // ユーザー登録チェック
-      if (!registerUser(userId)) {
-        const rejectionMessage = getNewUserRejectionMessage();
+        // ユーザー登録チェック
+        if (!registerUser(userId)) {
+          const rejectionMessage = getNewUserRejectionMessage();
+          await lineClient.replyMessage(event.replyToken, {
+            type: 'text',
+            text: rejectionMessage,
+          });
+          console.log(`❌ User registration rejected: ${userId.slice(0, 8)}***`);
+          return;
+        }
+
+        // セッション確認（セキュリティチェック）
+        if (!isSessionActive(userId) && conversationHistory.has(userId)) {
+          conversationHistory.delete(userId);
+          await lineClient.replyMessage(event.replyToken, {
+            type: 'text',
+            text: getSessionExpiredMessage(),
+          });
+          console.log(`🔒 Session expired message sent to: ${userId.slice(0, 8)}***`);
+          return;
+        }
+
+        // セッション活動更新
+        updateSessionActivity(userId);
+
+        // 日次利用制限チェック
+        if (!canUseTodayMore(userId)) {
+          const limitMessage = getDailyLimitMessage(0);
+          await lineClient.replyMessage(event.replyToken, {
+            type: 'text',
+            text: limitMessage,
+          });
+          console.log(`⏰ Daily limit reached for user: ${userId.slice(0, 8)}***`);
+          return;
+        }
+
+        // 利用回数をカウント
+        incrementDailyUsage(userId);
+        const remainingTurns = getRemainingTurns(userId);
+
+        // お焚き上げコマンドチェック（改良版：非同期処理を分離）
+        if (isPurificationCommand(userMessage)) {
+          const userStats = abTestStats.get(userId);
+          if (userStats && userStats.group === 'B') {
+            console.log(`🔥 Starting purification for user: ${userId.slice(-8)}`);
+            
+            // すぐに最初のメッセージを返信
+            await lineClient.replyMessage(event.replyToken, {
+              type: 'text',
+              text: PURIFICATION_MESSAGES[0].text
+            });
+            
+            // 後続処理を非同期で実行（webhook処理をブロックしない）
+            setImmediate(async () => {
+              try {
+                recordABTestMetric(userId, 'purificationUsed');
+                userStats.lastPurification = Date.now();
+                
+                // 残りのメッセージを時間差で送信
+                for (let i = 1; i < PURIFICATION_MESSAGES.length; i++) {
+                  setTimeout(async () => {
+                    try {
+                      await lineClient.pushMessage(userId, {
+                        type: 'text',
+                        text: PURIFICATION_MESSAGES[i].text
+                      });
+                    } catch (error) {
+                      console.error(`Push message error (step ${i}):`, error);
+                    }
+                  }, PURIFICATION_MESSAGES[i].delay);
+                }
+                
+                // 履歴削除
+                setTimeout(() => {
+                  conversationHistory.delete(userId);
+                  console.log(`🔥 Purification completed: ${userId.slice(-8)}`);
+                }, 8000);
+                
+              } catch (error) {
+                console.error('Purification background process error:', error);
+              }
+            });
+            
+            console.log(`🔥 Purification initiated for user: ${userId.slice(-8)}`);
+            return;
+          }
+        }
+
+        // 通常のAI応答処理
+        const { response: aiResponse, model } = await getAIResponse(userId, userMessage);
+        console.log(`🤖 AI (${model}) response generated for: ${userId.slice(0, 8)}***`);
+
+        // 制限情報を追加
+        let responseText = aiResponse;
+        if (remainingTurns <= 3 && remainingTurns > 0) {
+          responseText += `\n\n💫 ${getDailyLimitMessage(remainingTurns)}`;
+        }
+
+        // お焚き上げ提案チェック
+        const shouldSuggest = shouldSuggestPurification(userId, userMessage);
+        if (shouldSuggest) {
+          responseText += `\n\n${getPurificationSuggestionMessage()}`;
+          console.log(`✨ Purification suggested to user: ${userId.slice(-8)}`);
+        }
+
+        // LINE経由で返信
         await lineClient.replyMessage(event.replyToken, {
           type: 'text',
-          text: rejectionMessage,
+          text: responseText,
         });
-        console.log(`❌ User registration rejected: ${userId.slice(0, 8)}***`);
-        return;
+        
+        console.log(`✅ Response sent to: ${userId.slice(0, 8)}*** (${remainingTurns} turns remaining)`);
+        
+      } catch (error) {
+        console.error(`❌ Error processing event for user ${event.source?.userId?.slice(0, 8)}***:`, error);
+        
+        // エラー時も可能な限り応答を試みる
+        try {
+          await lineClient.replyMessage(event.replyToken, {
+            type: 'text',
+            text: 'すみません、少し調子が悪いみたいです😅 もう一度話しかけてくださいね！'
+          });
+        } catch (replyError) {
+          console.error('Failed to send error response:', replyError);
+        }
       }
-
-      // セッション確認（セキュリティチェック）
-      if (!isSessionActive(userId) && conversationHistory.has(userId)) {
-        // セッション期限切れの場合、履歴削除して通知
-        conversationHistory.delete(userId);
-        await lineClient.replyMessage(event.replyToken, {
-          type: 'text',
-          text: getSessionExpiredMessage(),
-        });
-        console.log(`🔒 Session expired message sent to: ${userId.slice(0, 8)}***`);
-        return;
-      }
-
-      // セッション活動更新
-      updateSessionActivity(userId);
-
-      // 日次利用制限チェック
-      if (!canUseTodayMore(userId)) {
-        const limitMessage = getDailyLimitMessage(0);
-        await lineClient.replyMessage(event.replyToken, {
-          type: 'text',
-          text: limitMessage,
-        });
-        console.log(`⏰ Daily limit reached for user: ${userId.slice(0, 8)}***`);
-        return;
-      }
-
-      // 利用回数をカウント
-      incrementDailyUsage(userId);
-      const remainingTurns = getRemainingTurns(userId);
-
-// 🔥 お焚き上げコマンドチェック（Bグループのみ）
-if (isPurificationCommand(userMessage)) {
-  const purificationExecuted = await executePurification(userId, event.replyToken);
-  if (purificationExecuted) {
-    console.log(`🔥 Purification executed for user: ${userId.slice(-8)}`);
-    return; // お焚き上げ実行時は通常のAI応答をスキップ
-  }
-}
-
-// AI応答を取得
-const { response: aiResponse, model } = await getAIResponse(userId, userMessage);
-
-console.log(`🤖 AI (${model}): ${aiResponse.slice(0, 50)}...`);
-
-// 制限情報を追加（残り少ない場合のみ）
-let responseText = aiResponse;
-if (remainingTurns <= 3 && remainingTurns > 0) {
-  responseText += `\n\n💫 ${getDailyLimitMessage(remainingTurns)}`;
-}
-
-// 🔥 お焚き上げ提案チェック（Bグループのみ）
-const shouldSuggest = shouldSuggestPurification(userId, userMessage);
-if (shouldSuggest) {
-  responseText += `\n\n${getPurificationSuggestionMessage()}`;
-  console.log(`✨ Purification suggested to user: ${userId.slice(-8)}`);
-}
-
-// LINE経由で返信
-await lineClient.replyMessage(event.replyToken, {
-  type: 'text',
-  text: responseText,
-});
-      
-      console.log(`✅ Response sent. Remaining turns: ${remainingTurns}`);
     }));
 
-    res.status(200).send('OK');
   } catch (error) {
-    console.error('Webhook Error:', error);
+    console.error('❌ Webhook parsing error:', error);
     res.status(500).send('Error');
   }
+});
+
+// ヘルスチェックエンドポイントも改良
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
+// 追加の監視エンドポイント
+app.get('/admin/webhook-test', (req, res) => {
+  const html = `
+    <h1>Webhook Test</h1>
+    <p>Current time: ${new Date().toISOString()}</p>
+    <p>Active users: ${registeredUsers.size}</p>
+    <p>Active sessions: ${sessionData.size}</p>
+    <p>Active conversations: ${conversationHistory.size}</p>
+  `;
+  res.send(html);
 });
 
 // ==============================
