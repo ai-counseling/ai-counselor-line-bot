@@ -255,7 +255,7 @@ function recordABTestMetric(userId, metricType, value = 1) {
   userStats.metrics[metricType] = (userStats.metrics[metricType] || 0) + value;
 
 // ==============================
-// お焚き上げ機能（Phase 3）
+// お焚き上げ機能（Phase 3）- 緊急修正版
 // ==============================
 
 const PURIFICATION_MESSAGES = [
@@ -273,6 +273,12 @@ const PURIFICATION_MESSAGES = [
   }
 ];
 
+// 注意: 関数の順序が重要です！isPurificationCommandを最初に定義
+function isPurificationCommand(message) {
+  const commands = ['お焚き上げ', 'たきあげ', 'リセット', '手放す', '忘れたい', 'お焚き上げして', 'リセットして'];
+  return commands.some(cmd => message.includes(cmd));
+}
+
 function shouldSuggestPurification(userId, userMessage) {
   const userStats = abTestStats.get(userId);
   if (!userStats || userStats.group !== 'B') return false;
@@ -287,11 +293,6 @@ function shouldSuggestPurification(userId, userMessage) {
                           (Date.now() - userStats.lastPurification) > 60 * 60 * 1000;
   
   return turnCount && hasEndingWord && notRecentlyUsed;
-}
-
-function isPurificationCommand(message) {
-  const commands = ['お焚き上げ', 'たきあげ', 'リセット', '手放す', '忘れたい', 'お焚き上げして', 'リセットして'];
-  return commands.some(cmd => message.includes(cmd));
 }
 
 async function executePurification(userId, replyToken) {
