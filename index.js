@@ -253,6 +253,105 @@ function recordABTestMetric(userId, metricType, value = 1) {
   if (!userStats) return;
   
   userStats.metrics[metricType] = (userStats.metrics[metricType] || 0) + value;
+
+// ==============================
+// お焚き上げ機能（Phase 3）
+// ==============================
+
+const PURIFICATION_MESSAGES = [
+  {
+    text: `✨ それでは、今日お話しした心の重荷を\nそっとお焚き上げさせていただきますね 🔥\n\n心の炎が、あなたの想いを\n優しく空へと昇らせていきます...`,
+    delay: 0
+  },
+  {
+    text: `🔥 メラメラ... パチパチ...\n\n今日の悩みや重たい気持ちが\n温かい炎に包まれて\nゆっくりと軽やかになっていきます ✨`,
+    delay: 3000
+  },
+  {
+    text: `🌟 お焚き上げが完了しました\n\nあなたの心に新しい風が吹いて\n明日への一歩を踏み出せますように 🕊️\n\nまた何かあればいつでもお話しくださいね 😊`,
+    delay: 6000
+  }
+];
+
+function shouldSuggestPurification(userId, userMessage) {
+  const userStats = abTestStats.get(userId);
+  if (!userStats || userStats.group !== 'B') return false;
+  
+  // お焚き上げ提案の条件
+  const turnCount = userStats.metrics.totalTurns >= 3; // 3ターン以上
+  const endingWords = ['ありがとう', 'スッキリ', 'した', '楽になった', '話せてよかった', '聞いてくれて', 'おかげで'];
+  const hasEndingWord = endingWords.some(word => userMessage.includes(word));
+  
+  // 最近お焚き上げを使っていない（1時間以上経過）
+  const notRecentlyUsed = !userStats.lastPurification || 
+                          (Date.now() - userStats.lastPurification) > 60 * 60 * 1000;
+  
+  return turnCount && hasEndingWord && notRecentlyUsed;
+}
+
+function isPurificationCommand(message) {
+  const commands = ['お焚き上げ', 'たきあげ', 'リセット', '手放す', '忘れたい', 'お焚き上げして', 'リセットして'];
+  return commands.some(cmd => message.includes(cmd));
+}
+
+async function executePurification(userId, replyToken) {
+  try {
+    const userStats = abTestStats.get(userId);
+    if (!userStats || userStats.group !== 'B') return false;
+    
+    console.log(`🔥 Starting purification for user: ${userId.slice(-8)}`);
+    
+    // お焚き上げメトリクス記録
+    recordABTestMetric(userId, 'purificationUsed');
+    userStats.lastPurification = Date.now();
+    
+    // 最初のメッセージを返信で送信
+    await lineClient.replyMessage(replyToken, {
+      type: 'text',
+      text: PURIFICATION_MESSAGES[0].text
+    });
+    
+    // 残りのメッセージを時間差でプッシュ送信
+    for (let i = 1; i < PURIFICATION_MESSAGES.length; i++) {
+      setTimeout(async () => {
+        try {
+          await lineClient.pushMessage(userId, {
+            type: 'text',
+            text: PURIFICATION_MESSAGES[i].text
+          });
+        } catch (error) {
+          console.error(`Push message error (step ${i}):`, error);
+        }
+      }, PURIFICATION_MESSAGES[i].delay);
+    }
+    
+    // 最後に会話履歴を削除（演出完了後）
+    setTimeout(() => {
+      conversationHistory.delete(userId);
+      console.log(`🔥 Purification completed and history cleared: ${userId.slice(-8)}`);
+    }, 8000); // 8秒後に履歴削除
+    
+    return true;
+  } catch (error) {
+    console.error('Purification execution error:', error);
+    return false;
+  }
+}
+
+function getPurificationSuggestionMessage() {
+  return `
+✨ 今日はたくさんお話しくださって、ありがとうございました😊
+
+もしよろしければ、今日お話しした心の重荷を
+「お焚き上げ」で優しく手放しませんか？🔥
+
+心の中がスッキリとリセットされる
+特別な体験をご用意しています✨
+
+**「お焚き上げ」とお声かけいただくと始まります**
+`;
+}
+
   
   // 日次統計更新
   const today = new Date().toISOString().split('T')[0];
@@ -459,23 +558,39 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
       incrementDailyUsage(userId);
       const remainingTurns = getRemainingTurns(userId);
 
-      // AI応答を取得
-      const { response: aiResponse, model } = await getAIResponse(userId, userMessage);
+// 🔥 お焚き上げコマンドチェック（Bグループのみ）
+if (isPurificationCommand(userMessage)) {
+  const purificationExecuted = await executePurification(userId, event.replyToken);
+  if (purificationExecuted) {
+    console.log(`🔥 Purification executed for user: ${userId.slice(-8)}`);
+    return; // お焚き上げ実行時は通常のAI応答をスキップ
+  }
+}
+
+// AI応答を取得
+const { response: aiResponse, model } = await getAIResponse(userId, userMessage);
+
+console.log(`🤖 AI (${model}): ${aiResponse.slice(0, 50)}...`);
+
+// 制限情報を追加（残り少ない場合のみ）
+let responseText = aiResponse;
+if (remainingTurns <= 3 && remainingTurns > 0) {
+  responseText += `\n\n💫 ${getDailyLimitMessage(remainingTurns)}`;
+}
+
+// 🔥 お焚き上げ提案チェック（Bグループのみ）
+const shouldSuggest = shouldSuggestPurification(userId, userMessage);
+if (shouldSuggest) {
+  responseText += `\n\n${getPurificationSuggestionMessage()}`;
+  console.log(`✨ Purification suggested to user: ${userId.slice(-8)}`);
+}
+
+// LINE経由で返信
+await lineClient.replyMessage(event.replyToken, {
+  type: 'text',
+  text: responseText,
+});
       
-      console.log(`🤖 AI (${model}): ${aiResponse.slice(0, 50)}...`);
-
-      // 制限情報を追加（残り少ない場合のみ）
-      let responseText = aiResponse;
-      if (remainingTurns <= 3 && remainingTurns > 0) {
-        responseText += `\n\n💫 ${getDailyLimitMessage(remainingTurns)}`;
-      }
-
-      // LINE経由で返信
-      await lineClient.replyMessage(event.replyToken, {
-        type: 'text',
-        text: responseText,
-      });
-
       console.log(`✅ Response sent. Remaining turns: ${remainingTurns}`);
     }));
 
@@ -552,21 +667,22 @@ app.post('/admin/cleanup', express.json(), (req, res) => {
     remaining: afterCount
   });
 });
-// ABテスト統計表示
-app.get('/admin/ab-stats', (req, res) => {
-  try {
-    const totalStats = {
-      A: { users: 0, totalTurns: 0, avgTurns: 0, newSessions: 0 },
-      B: { users: 0, totalTurns: 0, avgTurns: 0, newSessions: 0 }
-    };
+    // ABテスト統計表示
+    app.get('/admin/ab-stats', (req, res) => {
+      try {
+          const totalStats = {
+            A: { users: 0, totalTurns: 0, avgTurns: 0, newSessions: 0, purifications: 0 },
+            B: { users: 0, totalTurns: 0, avgTurns: 0, newSessions: 0, purifications: 0 }
+          };
     
-    // ユーザー統計集計
-    for (const [userId, stats] of abTestStats.entries()) {
-      const group = stats.group;
-      totalStats[group].users++;
-      totalStats[group].totalTurns += stats.metrics.totalTurns || 0;
-      totalStats[group].newSessions += stats.metrics.sessionsStarted || 0;
-    }
+     // ユーザー統計集計
+  for (const [userId, stats] of abTestStats.entries()) {
+    const group = stats.group;
+    totalStats[group].users++;
+    totalStats[group].totalTurns += stats.metrics.totalTurns || 0;
+    totalStats[group].newSessions += stats.metrics.sessionsStarted || 0;
+    totalStats[group].purifications += stats.metrics.purificationUsed || 0;
+  }
     
     // 平均計算
     totalStats.A.avgTurns = totalStats.A.users > 0 ? 
@@ -619,23 +735,26 @@ app.get('/admin/ab-stats', (req, res) => {
               <th>総ターン数</th>
               <th>平均ターン/人</th>
               <th>新規セッション</th>
+              <th>お焚き上げ使用</th>
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td><strong>A (Control)</strong></td>
-              <td>${totalStats.A.users}</td>
-              <td>${totalStats.A.totalTurns}</td>
-              <td>${totalStats.A.avgTurns}</td>
-              <td>${totalStats.A.newSessions}</td>
-            </tr>
-            <tr>
-              <td><strong>B (Treatment)</strong></td>
-              <td>${totalStats.B.users}</td>
-              <td>${totalStats.B.totalTurns}</td>
-              <td>${totalStats.B.avgTurns}</td>
-              <td>${totalStats.B.newSessions}</td>
-            </tr>
+           <tr>
+            <td><strong>A (Control)</strong></td>
+            <td>${totalStats.A.users}</td>
+            <td>${totalStats.A.totalTurns}</td>
+            <td>${totalStats.A.avgTurns}</td>
+            <td>${totalStats.A.newSessions}</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td><strong>B (Treatment)</strong></td>
+            <td>${totalStats.B.users}</td>
+            <td>${totalStats.B.totalTurns}</td>
+            <td>${totalStats.B.avgTurns}</td>
+            <td>${totalStats.B.newSessions}</td>
+            <td>${totalStats.B.purifications}</td>
+          </tr>
           </tbody>
         </table>
         
