@@ -145,9 +145,6 @@ function cleanupExpiredSessions() {
   }
 }
 
-// 定期的なセキュリティクリーンアップ
-setInterval(cleanupExpiredSessions, LIMITS.CLEANUP_INTERVAL);
-
 // 定期的なセキュリティクリーンアップ（ABテスト対応版）
 setInterval(() => {
   const now = Date.now();
@@ -248,16 +245,34 @@ function initializeABTestUser(userId) {
   return abTestStats.get(userId).group;
 }
 
+// この修正版は問題箇所のみを修正したものです
+
+// 1. recordABTestMetric関数を完全に修正（221行目付近）
 function recordABTestMetric(userId, metricType, value = 1) {
   const userStats = abTestStats.get(userId);
   if (!userStats) return;
   
   userStats.metrics[metricType] = (userStats.metrics[metricType] || 0) + value;
+  
+  // 日次統計更新
+  const today = new Date().toISOString().split('T')[0];
+  if (!dailyMetrics.has(today)) {
+    dailyMetrics.set(today, { 
+      A: { users: new Set(), turns: 0 }, 
+      B: { users: new Set(), turns: 0 } 
+    });
+  }
+  
+  const dailyStats = dailyMetrics.get(today);
+  const group = userStats.group;
+  
+  if (metricType === 'totalTurns') {
+    dailyStats[group].turns += value;
+    dailyStats[group].users.add(userId);
+  }
+}
 
-// ==============================
-// お焚き上げ機能（Phase 3）- 緊急修正版
-// ==============================
-
+// 2. お焚き上げ機能をここに配置
 const PURIFICATION_MESSAGES = [
   {
     text: `✨ それでは、今日お話しした心の重荷を\nそっとお焚き上げさせていただきますね 🔥\n\n心の炎が、あなたの想いを\n優しく空へと昇らせていきます...`,
@@ -273,7 +288,6 @@ const PURIFICATION_MESSAGES = [
   }
 ];
 
-// 注意: 関数の順序が重要です！isPurificationCommandを最初に定義
 function isPurificationCommand(message) {
   const commands = ['お焚き上げ', 'たきあげ', 'リセット', '手放す', '忘れたい', 'お焚き上げして', 'リセットして'];
   return commands.some(cmd => message.includes(cmd));
@@ -283,12 +297,10 @@ function shouldSuggestPurification(userId, userMessage) {
   const userStats = abTestStats.get(userId);
   if (!userStats || userStats.group !== 'B') return false;
   
-  // お焚き上げ提案の条件
-  const turnCount = userStats.metrics.totalTurns >= 3; // 3ターン以上
+  const turnCount = userStats.metrics.totalTurns >= 3;
   const endingWords = ['ありがとう', 'スッキリ', 'した', '楽になった', '話せてよかった', '聞いてくれて', 'おかげで'];
   const hasEndingWord = endingWords.some(word => userMessage.includes(word));
   
-  // 最近お焚き上げを使っていない（1時間以上経過）
   const notRecentlyUsed = !userStats.lastPurification || 
                           (Date.now() - userStats.lastPurification) > 60 * 60 * 1000;
   
@@ -302,17 +314,14 @@ async function executePurification(userId, replyToken) {
     
     console.log(`🔥 Starting purification for user: ${userId.slice(-8)}`);
     
-    // お焚き上げメトリクス記録
     recordABTestMetric(userId, 'purificationUsed');
     userStats.lastPurification = Date.now();
     
-    // 最初のメッセージを返信で送信
     await lineClient.replyMessage(replyToken, {
       type: 'text',
       text: PURIFICATION_MESSAGES[0].text
     });
     
-    // 残りのメッセージを時間差でプッシュ送信
     for (let i = 1; i < PURIFICATION_MESSAGES.length; i++) {
       setTimeout(async () => {
         try {
@@ -326,11 +335,10 @@ async function executePurification(userId, replyToken) {
       }, PURIFICATION_MESSAGES[i].delay);
     }
     
-    // 最後に会話履歴を削除（演出完了後）
     setTimeout(() => {
       conversationHistory.delete(userId);
       console.log(`🔥 Purification completed and history cleared: ${userId.slice(-8)}`);
-    }, 8000); // 8秒後に履歴削除
+    }, 8000);
     
     return true;
   } catch (error) {
@@ -353,24 +361,6 @@ function getPurificationSuggestionMessage() {
 `;
 }
 
-  
-  // 日次統計更新
-  const today = new Date().toISOString().split('T')[0];
-  if (!dailyMetrics.has(today)) {
-    dailyMetrics.set(today, { 
-      A: { users: new Set(), turns: 0 }, 
-      B: { users: new Set(), turns: 0 } 
-    });
-  }
-  
-  const dailyStats = dailyMetrics.get(today);
-  const group = userStats.group;
-  
-  if (metricType === 'totalTurns') {
-    dailyStats[group].turns += value;
-    dailyStats[group].users.add(userId);
-  }
-}
 
 // ==============================
 // GPTモデル選択（コスト最適化）
