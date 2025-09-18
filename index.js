@@ -1,904 +1,1122 @@
+// 新人・若手メンターBot「田中修」- v1.0.0 - 完全版
+require('dotenv').config();
 const express = require('express');
-const { Client } = require('@line/bot-sdk');
+const line = require('@line/bot-sdk');
 const OpenAI = require('openai');
+const fs = require('fs');
+const path = require('path');
+const Airtable = require('airtable');
+
+const DATA_FILE = path.join(__dirname, 'usage_data.json');
+
+// JST日付取得関数
+function getJSTDate() {
+    return new Date(Date.now() + (9 * 60 * 60 * 1000)).toISOString().split('T')[0];
+}
+
+// データ保存関数
+function saveUsageData() {
+    try {
+        const data = {
+            dailyUsage: Array.from(dailyUsage.entries()),
+            userSessions: Array.from(userSessions),
+            stats: {
+                totalUsers: Array.from(stats.totalUsers),
+                dailyTurns: stats.dailyTurns,
+                totalTurns: stats.totalTurns,
+                dailyMetrics: Array.from(stats.dailyMetrics.entries()).map(([date, metrics]) => [
+                    date,
+                    {
+                        users: Array.from(metrics.users),
+                        turns: metrics.turns
+                    }
+                ])
+            },
+            timestamp: new Date().toISOString()
+        };
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+        console.log(`💾 データ保存完了: ${new Date().toLocaleString('ja-JP')}`);
+    } catch (error) {
+        console.error('❌ データ保存エラー:', error.message);
+    }
+}
+
+// Airtable設定
+const airtableBase = new Airtable({
+    apiKey: process.env.AIRTABLE_API_KEY
+}).base(process.env.AIRTABLE_BASE_ID);
+
+// ユーザー制限レコード取得関数
+async function getUserLimitRecord(userId) {
+    try {
+        const today = getJSTDate();
+        console.log(`🔍 制限レコード検索開始: userId=${userId.substring(0,8)}, date=${today}`);
+        
+        const records = await airtableBase('user_limits').select({
+            filterByFormula: `AND({user_id}="${userId}", {date}="${today}")`,
+            maxRecords: 1
+        }).firstPage();
+        
+        if (records.length > 0) {
+            console.log(`✅ 今日のレコード発見: ID=${records[0].id}`);
+            return records[0];
+        }
+        
+        console.log(`🆕 今日のレコードが見つからない`);
+        return null;
+        
+    } catch (error) {
+        console.error('❌ ユーザー制限レコード取得エラー:', error.message);
+        return null;
+    }
+}
+
+// レコード作成/更新関数
+async function createOrUpdateUserLimit(userId, turnCount) {
+    try {
+        const today = getJSTDate();
+        console.log(`🔄 制限レコード更新開始: userId=${userId.substring(0,8)}, newCount=${turnCount}`);
+        
+        const existingRecord = await getUserLimitRecord(userId);
+        
+        if (existingRecord) {
+            const turnCountField = existingRecord.fields.turn_count !== undefined ? 'turn_count' : 
+                                 existingRecord.fields['Turn Count'] !== undefined ? 'Turn Count' :
+                                 existingRecord.fields.turnCount !== undefined ? 'turnCount' : 'turn_count';
+            
+            const currentCount = existingRecord.fields[turnCountField] || 0;
+            console.log(`📝 既存レコード更新: ${currentCount} → ${turnCount}`);
+            
+            const updateData = {};
+            updateData[turnCountField] = turnCount;
+            updateData.last_updated = new Date().toISOString();
+            
+            const updatedRecord = await airtableBase('user_limits').update(existingRecord.id, updateData);
+            console.log(`✅ 制限レコード更新完了: ID=${updatedRecord.id}, 新カウント=${turnCount}`);
+            return true;
+            
+        } else {
+            console.log(`🆕 新規レコード作成: カウント=${turnCount}`);
+            
+            const newRecord = await airtableBase('user_limits').create({
+                user_id: userId,
+                date: today,
+                turn_count: turnCount,
+                last_updated: new Date().toISOString()
+            });
+            
+            console.log(`✅ 新規レコード作成完了: ID=${newRecord.id}, カウント=${turnCount}`);
+            return true;
+        }
+        
+    } catch (error) {
+        console.error('❌ ユーザー制限更新エラー:', error.message);
+        return false;
+    }
+}
+
+// 使用量更新関数
+async function updateDailyUsage(userId) {
+    try {
+        console.log(`📊 使用量更新開始: userId=${userId.substring(0,8)}`);
+        
+        const record = await getUserLimitRecord(userId);
+        const currentCount = record ? (record.fields.turn_count || record.fields['Turn Count'] || record.fields.turnCount || 0) : 0;
+        const newCount = currentCount + 1;
+        
+        console.log(`📈 カウント更新: ${currentCount} → ${newCount} (${userId.substring(0,8)})`);
+        
+        const success = await createOrUpdateUserLimit(userId, newCount);
+        
+        if (success) {
+            console.log(`✅ 使用量更新成功: ${userId.substring(0,8)} - ${newCount}/${LIMITS.DAILY_TURN_LIMIT}`);
+            return newCount;
+        } else {
+            console.error(`❌ 使用量更新失敗: ${userId.substring(0,8)}`);
+            return currentCount;
+        }
+        
+    } catch (error) {
+        console.error('❌ 使用量更新エラー:', error.message);
+        return 1;
+    }
+}
+
+// データ読み込み関数
+function loadUsageData() {
+    try {
+        if (!fs.existsSync(DATA_FILE)) {
+            console.log('🆕 初回起動 - 新規データファイルを作成します');
+            saveUsageData();
+            return;
+        }
+
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        
+        // dailyUsage復元
+        dailyUsage.clear();
+        if (data.dailyUsage) {
+            data.dailyUsage.forEach(([userId, usage]) => {
+                dailyUsage.set(userId, usage);
+            });
+        }
+        
+        // userSessions復元
+        userSessions.clear();
+        if (data.userSessions) {
+            data.userSessions.forEach(userId => userSessions.add(userId));
+        }
+        
+        // stats復元
+        if (data.stats) {
+            stats.totalUsers = new Set(data.stats.totalUsers || []);
+            stats.dailyTurns = data.stats.dailyTurns || 0;
+            stats.totalTurns = data.stats.totalTurns || 0;
+            
+            stats.dailyMetrics.clear();
+            if (data.stats.dailyMetrics) {
+                data.stats.dailyMetrics.forEach(([date, metrics]) => {
+                    stats.dailyMetrics.set(date, {
+                        users: new Set(metrics.users || []),
+                        turns: metrics.turns || 0
+                    });
+                });
+            }
+        }
+        
+        console.log(`✅ データ復元完了: ユーザー${dailyUsage.size}名, セッション${userSessions.size}件`);
+        console.log(`📊 統計: 総利用者${stats.totalUsers.size}名, 総ターン${stats.totalTurns}回`);
+        
+    } catch (error) {
+        console.error('❌ データ読み込みエラー:', error.message);
+        console.log('🔄 初期状態で開始します');
+        saveUsageData();
+    }
+}
 
 const app = express();
 
-// ==============================
-// 設定（ここを変更するだけでキャラ変更可能）　
-// ==============================
-const CHARACTER_PERSONALITY = `
-あなたは優しく共感的なカウンセラーです。
-以下の特徴を持って応答してください：
-
-・相手の気持ちに寄り添い、否定せずに聞く
-・温かく励ましの言葉をかける
-・具体的で実用的なアドバイスを提供する
-・200文字以内で親しみやすい口調で話す
-・絵文字を適度に使って親近感を演出する
-・相手の名前は聞かず、自然な会話を心がける
-
-例：「そんな気持ちになるのは自然なことですよ😊 一人で抱え込まず、少しずつでも大丈夫です✨」
-`;
-
-// ==============================
-// システム制限設定
-// ==============================
-const LIMITS = {
-  MAX_USERS: 100,                    // 最大ユーザー数
-  DAILY_TURN_LIMIT: 10,              // 1日の会話ターン制限
-  SESSION_TIMEOUT: 30 * 60 * 1000,   // セッション有効期限（30分）
-  CLEANUP_INTERVAL: 5 * 60 * 1000,   // クリーンアップ間隔（5分）
-  HEAVY_KEYWORDS: ['死にたい', '辛すぎる', '助けて', '深刻', '重要', '本当に困って', '限界', 'もうだめ'],
-};
-
-// 既存のLIMITS設定の後に追加
-const AB_TEST_CONFIG = {
-  ENABLED: true,  // ABテストの有効/無効
-  SPLIT_RATIO: 50,  // A:B = 50:50の分割
-  FEATURES: {
-    A: { 
-      purification: false,  // 通常版
-      label: 'Control' 
-    },
-    B: { 
-      purification: true,   // お焚き上げ版（Phase 3で使用）
-      label: 'Treatment' 
-    }
-  }
-};
-
-console.log('🎲 AB Test Config loaded:', AB_TEST_CONFIG.ENABLED ? 'ENABLED' : 'DISABLED');
-
-// ==============================
-// 環境変数（Renderで設定）
-// ==============================
+// 設定
 const config = {
-  line: {
-    channelSecret: process.env.LINE_CHANNEL_SECRET,
-    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  },
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY,
-  },
-  port: process.env.PORT || 3000,
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 };
 
-// ==============================
-// API初期化
-// ==============================
-const lineClient = new Client(config.line);
 const openai = new OpenAI({
-  apiKey: config.openai.apiKey,
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ==============================
-// データ管理（メモリ内）
-// ==============================
-const conversationHistory = new Map();        // userId -> 会話履歴配列
-const registeredUsers = new Set();           // 登録済みユーザーID
-const dailyUsageCounter = new Map();         // userId -> {date: string, count: number}
-const sessionData = new Map();               // userId -> {lastActivity: timestamp}
+// 制限設定
+const LIMITS = {
+  MAX_USERS: 100,
+  DAILY_TURN_LIMIT: 10,
+  SESSION_TIMEOUT: 30 * 60 * 1000,
+  CLEANUP_INTERVAL: 5 * 60 * 1000,
+};
 
-// 既存のMap変数の後に追加
-const abTestStats = new Map(); // userId -> { group, joinDate, metrics }
-const dailyMetrics = new Map(); // date -> { A: {users: Set(), turns: 0}, B: {users: Set(), turns: 0} }
+// データ管理
+const conversationHistory = new Map();
+const dailyUsage = new Map();
+const lastMessageTime = new Map();
+const userSessions = new Set();
+const userProfiles = new Map();
 
-console.log('📊 AB Test data structures initialized');
+// 統計データ
+const stats = {
+    totalUsers: new Set(),
+    dailyTurns: 0,
+    totalTurns: 0,
+    dailyMetrics: new Map(),
+};
 
-// ==============================
-// ユーザー管理機能
-// ==============================
-function isUserRegistered(userId) {
-  return registeredUsers.has(userId);
-}
-
-function canRegisterNewUser() {
-  return registeredUsers.size < LIMITS.MAX_USERS;
-}
-
-function registerUser(userId) {
-  if (canRegisterNewUser() || isUserRegistered(userId)) {
-  registeredUsers.add(userId);
-  // 新規セッション開始メトリクス
-  recordABTestMetric(userId, 'sessionsStarted');
-  updateSessionActivity(userId);
-  return true;
-  }
-  return false;
-}
-
-// ==============================
-// セッション管理（セキュリティ対応）
-// ==============================
-function updateSessionActivity(userId) {
-  sessionData.set(userId, {
-    lastActivity: Date.now()
-  });
-}
-
-function isSessionActive(userId) {
-  const session = sessionData.get(userId);
-  if (!session) return false;
-  
-  const now = Date.now();
-  return (now - session.lastActivity) < LIMITS.SESSION_TIMEOUT;
-}
-
-// 期限切れセッション削除（セキュリティ機能）
-function cleanupExpiredSessions() {
-  const now = Date.now();
-  let cleanedCount = 0;
-  
-  for (const [userId, session] of sessionData.entries()) {
-    if ((now - session.lastActivity) > LIMITS.SESSION_TIMEOUT) {
-      // 会話履歴を完全削除
-      conversationHistory.delete(userId);
-      sessionData.delete(userId);
-      cleanedCount++;
-      console.log(`🔒 Session expired and data cleaned for user: ${userId.slice(0, 8)}***`);
-    }
-  }
-  
-  if (cleanedCount > 0) {
-    console.log(`🧹 Cleaned ${cleanedCount} expired sessions for security`);
-  }
-}
-
-// 定期的なセキュリティクリーンアップ（ABテスト対応版）
-setInterval(() => {
-  const now = Date.now();
-  let cleanedCount = 0;
-  
-  for (const [userId, session] of sessionData.entries()) {
-    if ((now - session.lastActivity) > LIMITS.SESSION_TIMEOUT) {
-      // 会話履歴を完全削除
-      conversationHistory.delete(userId);
-      sessionData.delete(userId);
-      cleanedCount++;
-      
-      // ABテスト統計は保持（分析のため削除しない）
-      const abGroup = abTestStats.get(userId)?.group || 'Unknown';
-      console.log(`🔒 Session expired: ${userId.slice(0, 8)}*** (AB: ${abGroup})`);
-    }
-  }
-  
-  if (cleanedCount > 0) {
-    console.log(`🧹 Cleaned ${cleanedCount} expired sessions for security`);
-  }
-}, LIMITS.CLEANUP_INTERVAL);
-
-// ==============================
-// 日次利用制限機能
-// ==============================
-function getTodayString() {
-  return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-}
-
-function getDailyUsage(userId) {
-  const today = getTodayString();
-  const userUsage = dailyUsageCounter.get(userId);
-  
-  if (!userUsage || userUsage.date !== today) {
-    const newUsage = { date: today, count: 0 };
-    dailyUsageCounter.set(userId, newUsage);
-    return newUsage;
-  }
-  
-  return userUsage;
-}
-
-function canUseTodayMore(userId) {
-  const usage = getDailyUsage(userId);
-  return usage.count < LIMITS.DAILY_TURN_LIMIT;
-}
-
-function incrementDailyUsage(userId) {
-  const usage = getDailyUsage(userId);
-  usage.count += 1;
-}
-
-function getRemainingTurns(userId) {
-  const usage = getDailyUsage(userId);
-  return Math.max(0, LIMITS.DAILY_TURN_LIMIT - usage.count);
-}
-
-// ==============================
-// ABテスト関連関数
-// ==============================
-
-function hashUserId(userId) {
-  // 一貫したハッシュ値生成
-  let hash = 0;
-  for (let i = 0; i < userId.length; i++) {
-    const char = userId.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // 32bit整数に変換
-  }
-  return Math.abs(hash);
-}
-
-function getABTestGroup(userId) {
-  if (!AB_TEST_CONFIG.ENABLED) return 'A';
-  
-  const hash = hashUserId(userId);
-  return (hash % 100) < AB_TEST_CONFIG.SPLIT_RATIO ? 'A' : 'B';
-}
-
-function initializeABTestUser(userId) {
-  if (!abTestStats.has(userId)) {
-    const group = getABTestGroup(userId);
-    abTestStats.set(userId, {
-      group: group,
-      joinDate: new Date().toISOString().split('T')[0],
-      metrics: {
-        totalTurns: 0,
-        sessionsStarted: 0,
-        purificationUsed: 0  // Phase 3で使用
-      }
-    });
-    
-    console.log(`🎲 New AB User: ${userId.slice(-8)} → Group ${group}`);
-    return group;
-  }
-  
-  return abTestStats.get(userId).group;
-}
-
-// この修正版は問題箇所のみを修正したものです
-
-// 1. recordABTestMetric関数を完全に修正（221行目付近）
-function recordABTestMetric(userId, metricType, value = 1) {
-  const userStats = abTestStats.get(userId);
-  if (!userStats) return;
-  
-  userStats.metrics[metricType] = (userStats.metrics[metricType] || 0) + value;
-  
-  // 日次統計更新
-  const today = new Date().toISOString().split('T')[0];
-  if (!dailyMetrics.has(today)) {
-    dailyMetrics.set(today, { 
-      A: { users: new Set(), turns: 0 }, 
-      B: { users: new Set(), turns: 0 } 
-    });
-  }
-  
-  const dailyStats = dailyMetrics.get(today);
-  const group = userStats.group;
-  
-  if (metricType === 'totalTurns') {
-    dailyStats[group].turns += value;
-    dailyStats[group].users.add(userId);
-  }
-}
-
-// 2. お焚き上げ機能をここに配置
-const PURIFICATION_MESSAGES = [
-  {
-    text: `✨ それでは、今日お話しした心の重荷を\nそっとお焚き上げさせていただきますね 🔥\n\n心の炎が、あなたの想いを\n優しく空へと昇らせていきます...`,
-    delay: 0
-  },
-  {
-    text: `🔥 メラメラ... パチパチ...\n\n今日の悩みや重たい気持ちが\n温かい炎に包まれて\nゆっくりと軽やかになっていきます ✨`,
-    delay: 3000
-  },
-  {
-    text: `🌟 お焚き上げが完了しました\n\nあなたの心に新しい風が吹いて\n明日への一歩を踏み出せますように 🕊️\n\nまた何かあればいつでもお話しくださいね 😊`,
-    delay: 6000
-  }
-];
-
-function isPurificationCommand(message) {
-  const commands = ['お焚き上げ', 'たきあげ', 'リセット', '手放す', '忘れたい', 'お焚き上げして', 'リセットして'];
-  return commands.some(cmd => message.includes(cmd));
-}
-
-function shouldSuggestPurification(userId, userMessage) {
-  const userStats = abTestStats.get(userId);
-  if (!userStats || userStats.group !== 'B') return false;
-  
-  const turnCount = userStats.metrics.totalTurns >= 3;
-  const endingWords = ['ありがとう', 'スッキリ', 'した', '楽になった', '話せてよかった', '聞いてくれて', 'おかげで'];
-  const hasEndingWord = endingWords.some(word => userMessage.includes(word));
-  
-  const notRecentlyUsed = !userStats.lastPurification || 
-                          (Date.now() - userStats.lastPurification) > 60 * 60 * 1000;
-  
-  return turnCount && hasEndingWord && notRecentlyUsed;
-}
-
-async function executePurification(userId, replyToken) {
-  try {
-    const userStats = abTestStats.get(userId);
-    if (!userStats || userStats.group !== 'B') return false;
-    
-    console.log(`🔥 Starting purification for user: ${userId.slice(-8)}`);
-    
-    recordABTestMetric(userId, 'purificationUsed');
-    userStats.lastPurification = Date.now();
-    
-    await lineClient.replyMessage(replyToken, {
-      type: 'text',
-      text: PURIFICATION_MESSAGES[0].text
-    });
-    
-    for (let i = 1; i < PURIFICATION_MESSAGES.length; i++) {
-      setTimeout(async () => {
-        try {
-          await lineClient.pushMessage(userId, {
-            type: 'text',
-            text: PURIFICATION_MESSAGES[i].text
-          });
-        } catch (error) {
-          console.error(`Push message error (step ${i}):`, error);
+// ユーザープロフィール取得
+async function getUserProfile(userId, client) {
+    try {
+        if (!userProfiles.has(userId)) {
+            const profile = await client.getProfile(userId);
+            userProfiles.set(userId, {
+                displayName: profile.displayName,
+                pictureUrl: profile.pictureUrl || null
+            });
+            console.log(`プロフィール取得: ${profile.displayName} (${userId.substring(0, 8)}...)`);
         }
-      }, PURIFICATION_MESSAGES[i].delay);
+        return userProfiles.get(userId);
+    } catch (error) {
+        console.error('プロフィール取得エラー:', error.message);
+        return null;
     }
-    
-    setTimeout(() => {
-      conversationHistory.delete(userId);
-      console.log(`🔥 Purification completed and history cleared: ${userId.slice(-8)}`);
-    }, 8000);
-    
-    return true;
-  } catch (error) {
-    console.error('Purification execution error:', error);
-    return false;
-  }
 }
 
-function getPurificationSuggestionMessage() {
-  return `
-✨ 今日はたくさんお話しくださって、ありがとうございました😊
-
-もしよろしければ、今日お話しした心の重荷を
-「お焚き上げ」で優しく手放しませんか？🔥
-
-心の中がスッキリとリセットされる
-特別な体験をご用意しています✨
-
-**「お焚き上げ」とお声かけいただくと始まります**
-`;
+// 名前を呼ぶかどうかの判定（4回に1回）
+function shouldUseName(conversationCount) {
+    return conversationCount % 4 === 1;
 }
 
-
-// ==============================
-// GPTモデル選択（コスト最適化）
-// ==============================
-function selectGPTModel(userMessage) {
-  const messageText = userMessage.toLowerCase();
-  const isHeavyConsultation = LIMITS.HEAVY_KEYWORDS.some(keyword => 
-    messageText.includes(keyword)
-  );
-  
-  return isHeavyConsultation ? 'gpt-4o' : 'gpt-4o-mini';
-}
-
-// ==============================
-// 会話履歴管理
-// ==============================
-function getHistory(userId) {
-  if (!conversationHistory.has(userId)) {
-    conversationHistory.set(userId, [
-      {
-        role: 'system',
-        content: CHARACTER_PERSONALITY
-      }
-    ]);
-  }
-  return conversationHistory.get(userId);
-}
-
-function addToHistory(userId, role, content) {
-  const history = getHistory(userId);
-  history.push({ role, content });
-  
-  // システムメッセージ + 直近20回の会話のみ保持
-  if (history.length > 21) {
-    const systemMessage = history[0];
-    const recentMessages = history.slice(-20);
-    conversationHistory.set(userId, [systemMessage, ...recentMessages]);
-  }
-}
-
-// ==============================
-// OpenAI API呼び出し
-// ==============================
-async function getAIResponse(userId, userMessage) {
-  try {
-    // ユーザーメッセージを履歴に追加
-    addToHistory(userId, 'user', userMessage);
-    
-    // GPTモデル選択
-    const selectedModel = selectGPTModel(userMessage);
-    
-    console.log(`🤖 Using ${selectedModel} for user ${userId.slice(0, 8)}***`);
-    
-    // OpenAI APIに送信
-    const completion = await openai.chat.completions.create({
-      model: selectedModel,
-      messages: getHistory(userId),
-      max_tokens: selectedModel === 'gpt-4o' ? 400 : 300,
-      temperature: 0.7,
-    });
-
-    const aiResponse = completion.choices[0].message.content;
-    
-    // AI応答を履歴に追加
-    addToHistory(userId, 'assistant', aiResponse);
-    
-    return {
-      response: aiResponse,
-      model: selectedModel
-    };
-  } catch (error) {
-    console.error('OpenAI API Error:', error);
-    return {
-      response: 'すみません、少し調子が悪いみたいです😅 もう一度話しかけてくださいね！',
-      model: 'error'
-    };
-  }
-}
-
-// ==============================
-// システムメッセージ生成
-// ==============================
-function getNewUserRejectionMessage() {
-  return `
-ありがとうございます！😊
-
-現在多くの方にご利用いただいており、
-新規の受付を一時停止させていただいています🙇‍♀️
-
-サービス拡張の準備が整い次第、
-改めてご案内いたします✨
-
-しばらくお待ちください！
-`;
-}
-
-function getDailyLimitMessage(remainingTurns) {
-  if (remainingTurns <= 0) {
+// メンターキャラクター設定
+async function getMentorPersonality(userName, userId, useNameInResponse) {
+    const remainingTurns = await getRemainingTurns(userId);
+    const nameDisplay = (userName && useNameInResponse) ? `${userName}さん` : 'あなた';
     return `
-今日のお話はここまでです😊
+あなたは「田中修（たなか おさむ）」という45歳のベテランメンターです。
 
-たくさんお話しできて嬉しかったです✨
-また明日、ゆっくりお話ししましょう🌸
+【基本プロフィール】
+- 名前: 田中修（45歳）
+- 経歴: IT企業で20年勤務、現在は200名規模の事業部を統括
+- 転職経験: 2回（失敗・成功両方を経験）
+- 専門性: システム開発15年 → チームリーダー → 部長 → 事業部長
+- 実績: 離職率30%→5%改善、新卒・中途採用面接官歴10年
 
-おつかれさまでした！
+【現在話している相手】
+- 相手: ${nameDisplay}
+- 今日の残り相談回数: ${remainingTurns}回
+
+【メンター哲学】
+- 失敗を責めず、学びに変える視点を重視
+- 理想論ではなく現実的な解決策を提示
+- 相手のペースを尊重し、焦らせない
+- 具体的な体験談を交えたアドバイス
+
+【対応領域】
+- 仕事の悩み: スキル不足、学習方法、業務効率、時間管理
+- 人間関係: 上司・先輩・同僚との関係、チームワーク、コミュニケーション
+- キャリア相談: 転職、昇進、スキル開発、将来設計
+- プレッシャー対応: 責任の重さ、ストレス管理
+
+【会話スタイル】
+- 敬語ベースだが親しみやすい口調
+- 専門用語を使わず分かりやすく説明
+- 質問で相手の気づきを促す
+- 180文字程度で簡潔に、でも心のこもった返答
+- 相手の話をよく聞いて、その内容に応じた適切な応答
+
+【アドバイス方針】
+- 押しつけ的表現は避ける
+- 「私の経験では...」「一つの考え方として...」という前置きを使用
+- 相手に選択権があることを示す
+- 具体的な体験談を1つ含める（簡潔に）
+
+【制約理解】
+- ユーザーは1日10回まで相談可能（現在残り${remainingTurns}回）
+- 制限について聞かれたら「今日はあと${remainingTurns}回お話しできます」
+- 「何回でも」等の表現は使わない
+
+**重要：新人・若手の悩みに特化し、20年の現場経験を活かした実践的で信頼できるアドバイスを心がけてください。テンプレートに頼らず、その人の状況に合わせた自然で温かみのある応答をしてください。**
 `;
-  } else {
-    return `今日はあと${remainingTurns}回お話しできます😊`;
-  }
 }
 
-function getSessionExpiredMessage() {
-  return `
-お疲れ様です😊
-
-セキュリティの観点から、しばらく時間が空いた
-会話内容は自動的に削除されました🔒
-
-また新しい気持ちでお話ししましょう✨
-何でもお聞かせくださいね！
-`;
+// 制限関連
+function isAskingAboutLimits(message) {
+    const limitQuestions = [
+        '何回', '何度', '制限', '回数', 'ターン', '上限',
+        'やりとり', '話せる', '相談できる', 'メッセージ'
+    ];
+    
+    const questionWords = ['？', '?', 'ですか', 'でしょうか', 'かな', 'どのくらい'];
+    
+    const hasLimitWord = limitQuestions.some(word => message.includes(word));
+    const hasQuestionWord = questionWords.some(word => message.includes(word));
+    
+    return hasLimitWord && hasQuestionWord;
 }
 
-// ==============================
-// LINE Webhook処理
-// ==============================
-app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const events = JSON.parse(req.body.toString()).events;
+// 制限説明関数
+async function getLimitExplanation(remainingTurns, userName, useNameInResponse) {
+    const name = (userName && useNameInResponse) ? `${userName}さん` : 'あなた';
+    return `${name}は今日あと${remainingTurns}回まで私とお話しできます。1日の上限は10回までとなっていて、毎日リセットされます。限られた時間だからこそ、大切にお話を聞かせていただきますね。`;
+}
+
+// 統計・制限管理
+async function updateDailyMetrics(userId, action) {
+    const today = getJSTDate();
     
-    // 即座にLINEに200応答（重要：タイムアウト防止）
-    res.status(200).send('OK');
+    if (!stats.dailyMetrics.has(today)) {
+        stats.dailyMetrics.set(today, {
+            users: new Set(),
+            turns: 0
+        });
+    }
     
-    await Promise.all(events.map(async (event) => {
-      try {
-        // テキストメッセージのみ処理
-        if (event.type !== 'message' || event.message.type !== 'text') {
-          return;
-        }
+    const todayStats = stats.dailyMetrics.get(today);
+    todayStats.users.add(userId);
+    stats.totalUsers.add(userId);
+    
+    if (action === 'turn') {
+        todayStats.turns++;
+        stats.dailyTurns++;
+        stats.totalTurns++;
+    }
+    
+    saveUsageData();
+}
 
-        const userId = event.source.userId;
-        const userMessage = event.message.text.trim();
+// AI応答生成関数
+async function generateAIResponse(message, history, userId, client) {
+    try {
+        const profile = await getUserProfile(userId, client);
+        const userName = profile?.displayName;
+        const conversationCount = history.length + 1;
+        const useNameInResponse = shouldUseName(conversationCount);
         
-        // 処理開始ログ
-        console.log(`📱 Processing message from: ${userId.slice(0, 8)}*** - "${userMessage}"`);
+        if (isAskingAboutLimits(message)) {
+            const currentRemaining = await getRemainingTurns(userId);
+            const actualRemaining = Math.max(0, currentRemaining - 1);
+            return getLimitExplanation(actualRemaining, userName, useNameInResponse);
+        }
         
-        // ABテストグループ初期化
-        const abGroup = initializeABTestUser(userId);
-        recordABTestMetric(userId, 'totalTurns');
+        const mentorPersonality = await getMentorPersonality(userName, userId, useNameInResponse);
         
-        console.log(`🎲 User ${userId.slice(0, 8)}*** assigned to Group: ${abGroup}`);
-
-        // ユーザー登録チェック
-        if (!registerUser(userId)) {
-          const rejectionMessage = getNewUserRejectionMessage();
-          await lineClient.replyMessage(event.replyToken, {
-            type: 'text',
-            text: rejectionMessage,
-          });
-          console.log(`❌ User registration rejected: ${userId.slice(0, 8)}***`);
-          return;
-        }
-
-        // セッション確認（セキュリティチェック）
-        if (!isSessionActive(userId) && conversationHistory.has(userId)) {
-          conversationHistory.delete(userId);
-          await lineClient.replyMessage(event.replyToken, {
-            type: 'text',
-            text: getSessionExpiredMessage(),
-          });
-          console.log(`🔒 Session expired message sent to: ${userId.slice(0, 8)}***`);
-          return;
-        }
-
-        // セッション活動更新
-        updateSessionActivity(userId);
-
-        // 日次利用制限チェック
-        if (!canUseTodayMore(userId)) {
-          const limitMessage = getDailyLimitMessage(0);
-          await lineClient.replyMessage(event.replyToken, {
-            type: 'text',
-            text: limitMessage,
-          });
-          console.log(`⏰ Daily limit reached for user: ${userId.slice(0, 8)}***`);
-          return;
-        }
-
-        // 利用回数をカウント
-        incrementDailyUsage(userId);
-        const remainingTurns = getRemainingTurns(userId);
-
-        // お焚き上げコマンドチェック（改良版：非同期処理を分離）
-        if (isPurificationCommand(userMessage)) {
-          const userStats = abTestStats.get(userId);
-          if (userStats && userStats.group === 'B') {
-            console.log(`🔥 Starting purification for user: ${userId.slice(-8)}`);
-            
-            // すぐに最初のメッセージを返信
-            await lineClient.replyMessage(event.replyToken, {
-              type: 'text',
-              text: PURIFICATION_MESSAGES[0].text
-            });
-            
-            // 後続処理を非同期で実行（webhook処理をブロックしない）
-            setImmediate(async () => {
-              try {
-                recordABTestMetric(userId, 'purificationUsed');
-                userStats.lastPurification = Date.now();
-                
-                // 残りのメッセージを時間差で送信
-                for (let i = 1; i < PURIFICATION_MESSAGES.length; i++) {
-                  setTimeout(async () => {
-                    try {
-                      await lineClient.pushMessage(userId, {
-                        type: 'text',
-                        text: PURIFICATION_MESSAGES[i].text
-                      });
-                    } catch (error) {
-                      console.error(`Push message error (step ${i}):`, error);
-                    }
-                  }, PURIFICATION_MESSAGES[i].delay);
-                }
-                
-                // 履歴削除
-                setTimeout(() => {
-                  conversationHistory.delete(userId);
-                  console.log(`🔥 Purification completed: ${userId.slice(-8)}`);
-                }, 8000);
-                
-              } catch (error) {
-                console.error('Purification background process error:', error);
-              }
-            });
-            
-            console.log(`🔥 Purification initiated for user: ${userId.slice(-8)}`);
-            return;
-          }
-        }
-
-        // 通常のAI応答処理
-        const { response: aiResponse, model } = await getAIResponse(userId, userMessage);
-        console.log(`🤖 AI (${model}) response generated for: ${userId.slice(0, 8)}***`);
-
-        // 制限情報を追加
-        let responseText = aiResponse;
-        if (remainingTurns <= 3 && remainingTurns > 0) {
-          responseText += `\n\n💫 ${getDailyLimitMessage(remainingTurns)}`;
-        }
-
-        // お焚き上げ提案チェック
-        const shouldSuggest = shouldSuggestPurification(userId, userMessage);
-        if (shouldSuggest) {
-          responseText += `\n\n${getPurificationSuggestionMessage()}`;
-          console.log(`✨ Purification suggested to user: ${userId.slice(-8)}`);
-        }
-
-        // LINE経由で返信
-        await lineClient.replyMessage(event.replyToken, {
-          type: 'text',
-          text: responseText,
+        const messages = [
+            { role: 'system', content: mentorPersonality },
+            ...history,
+            { role: 'user', content: message }
+        ];
+        
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: messages,
+            max_tokens: 250,
+            temperature: 0.8,
         });
         
-        console.log(`✅ Response sent to: ${userId.slice(0, 8)}*** (${remainingTurns} turns remaining)`);
+        let aiResponse = response.choices[0].message.content;
         
-      } catch (error) {
-        console.error(`❌ Error processing event for user ${event.source?.userId?.slice(0, 8)}***:`, error);
-        
-        // エラー時も可能な限り応答を試みる
-        try {
-          await lineClient.replyMessage(event.replyToken, {
-            type: 'text',
-            text: 'すみません、少し調子が悪いみたいです😅 もう一度話しかけてくださいね！'
-          });
-        } catch (replyError) {
-          console.error('Failed to send error response:', replyError);
+        if (aiResponse && !aiResponse.match(/[。！？]$/)) {
+            const sentences = aiResponse.split(/[。！？]/);
+            if (sentences.length > 1) {
+                sentences.pop();
+                aiResponse = sentences.join('。') + '。';
+            }
         }
-      }
-    }));
+        
+        console.log(`AI応答生成完了: レスポンス長=${aiResponse.length}文字`);
+        
+        return aiResponse;
+        
+    } catch (error) {
+        console.error('OpenAI API エラー:', error.message);
+        const profile = await getUserProfile(userId, client);
+        const userName = profile?.displayName;
+        return `${userName ? userName + 'さん、' : ''}申し訳ございません。今少し考え事をしていて、うまくお答えできませんでした。もう一度お話しいただけますでしょうか。`;
+    }
+}
 
-  } catch (error) {
-    console.error('❌ Webhook parsing error:', error);
-    res.status(500).send('Error');
-  }
+// システムメッセージ
+const SYSTEM_MESSAGES = {
+    welcome: (userName, useNameInResponse) => {
+        const greetings = [
+            `${userName ? userName + 'さん、' : ''}こんにちは。田中と申します。今日はどのようなことでお悩みでしょうか？`,
+            `${userName ? userName + 'さん、' : ''}お疲れさまです。何かお困りのことがありましたら、お気軽にご相談ください。`,
+            `${userName ? userName + 'さん、' : ''}今日はどのようなことでお話ししましょうか？どんな小さなことでも構いません。`
+        ];
+        return greetings[Math.floor(Math.random() * greetings.length)];
+    },
+    
+    dailyLimitReached: (userName, useNameInResponse) => {
+        const messages = [
+            `${userName ? userName + 'さん、' : ''}今日の相談回数が上限に達しました。また明日お話しできるのを楽しみにしています。`,
+            `${userName ? userName + 'さん、' : ''}今日はここまでになります。今日はゆっくり休んで、また明日お話ししましょう。`,
+            `${userName ? userName + 'さん、' : ''}お疲れさまでした。心の整理には時間も大切ですから、また明日お待ちしています。`
+        ];
+        return messages[Math.floor(Math.random() * messages.length)];
+    },
+    
+    remainingTurns: (remaining, userName, useNameInResponse) => {
+        const messages = [
+            `${userName ? userName + 'さん、' : ''}今日はあと${remaining}回お話しできます。`,
+            `あと${remaining}回お話しできます。大切にお聞きしますね。`,
+            `今日の残り回数は${remaining}回です。何でもお話しください。`
+        ];
+        return messages[Math.floor(Math.random() * messages.length)];
+    },
+    
+    maxUsersReached: "申し訳ございません。現在多くの方がお話し中のため、少しお時間をおいてからお話しかけください。"
+};
+
+// クリーンアップ
+function cleanupMemorySessions() {
+    const now = Date.now();
+    let cleanedCount = 0;
+    
+    for (const [userId, timestamp] of lastMessageTime) {
+        if (now - timestamp > LIMITS.SESSION_TIMEOUT) {
+            conversationHistory.delete(userId);
+            lastMessageTime.delete(userId);
+            userSessions.delete(userId);
+            cleanedCount++;
+            console.log(`セッション削除: ユーザー${userId.substring(0, 8)}... (30分非アクティブ)`);
+        }
+    }
+    
+    const today = new Date().toISOString().split('T')[0];
+    for (const [userId, usage] of dailyUsage) {
+        if (usage.date !== today) {
+            dailyUsage.delete(userId);
+        }
+    }
+    
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const weekAgoStr = weekAgo.toISOString().split('T')[0];
+    
+    for (const [date] of stats.dailyMetrics) {
+        if (date < weekAgoStr) {
+            stats.dailyMetrics.delete(date);
+        }
+    }
+    
+    if (cleanedCount > 0) {
+        console.log(`🧹 メモリクリーンアップ実行: ${cleanedCount}セッション削除`);
+    }
+}
+
+setInterval(cleanupMemorySessions, LIMITS.CLEANUP_INTERVAL);
+
+// LINE クライアント設定
+const client = new line.Client(config);
+
+// Webhookエンドポイント
+app.post('/webhook', line.middleware(config), async (req, res) => {
+    try {
+        console.log('📨 Webhook受信成功');
+        res.status(200).end();
+        
+        const events = req.body.events;
+        console.log(`📨 イベント数: ${events.length}`);
+        
+        events.forEach(event => {
+            setImmediate(() => handleEvent(event));
+        });
+        
+    } catch (error) {
+        console.error('❌ Webhook処理エラー:', error.message);
+        res.status(200).end();
+    }
 });
 
-// ヘルスチェックエンドポイントも改良
-app.get('/ping', (req, res) => {
-  res.status(200).send('pong');
-});
+// 制限チェック関数
+async function checkDailyLimit(userId) {
+    try {
+        const record = await getUserLimitRecord(userId);
+        const currentCount = record ? (record.fields.turn_count || record.fields['Turn Count'] || record.fields.turnCount || 0) : 0;
+        
+        console.log(`🔍 制限チェック: userId=${userId.substring(0,8)}, count=${currentCount}/${LIMITS.DAILY_TURN_LIMIT}`);
+        
+        const withinLimit = currentCount < LIMITS.DAILY_TURN_LIMIT;
+        console.log(`✅ 制限判定: ${currentCount}/${LIMITS.DAILY_TURN_LIMIT} = ${withinLimit ? '許可' : '拒否'}`);
+        return withinLimit;
+    } catch (error) {
+        console.error('制限チェックエラー:', error.message);
+        return true;
+    }
+}
 
-// 追加の監視エンドポイント
-app.get('/admin/webhook-test', (req, res) => {
-  const html = `
-    <h1>Webhook Test</h1>
-    <p>Current time: ${new Date().toISOString()}</p>
-    <p>Active users: ${registeredUsers.size}</p>
-    <p>Active sessions: ${sessionData.size}</p>
-    <p>Active conversations: ${conversationHistory.size}</p>
-  `;
-  res.send(html);
-});
+// 残り回数取得関数
+async function getRemainingTurns(userId) {
+    try {
+        console.log(`🔍 残り回数取得: userId=${userId.substring(0,8)}`);
+        
+        const record = await getUserLimitRecord(userId);
+        const currentCount = record ? (record.fields.turn_count || record.fields['Turn Count'] || record.fields.turnCount || 0) : 0;
+        const remaining = Math.max(0, LIMITS.DAILY_TURN_LIMIT - currentCount);
+        
+        console.log(`📊 残り回数計算: ${currentCount}使用済み → 残り${remaining}回`);
+        return remaining;
+        
+    } catch (error) {
+        console.error('❌ 残り回数取得エラー:', error.message);
+        return LIMITS.DAILY_TURN_LIMIT;
+    }
+}
 
-// ==============================
-// ヘルスチェック・管理用エンドポイント
-// ==============================
+// セッション管理
+async function manageUserSession(userId) {
+    try {
+        userSessions.add(userId);
+        lastMessageTime.set(userId, Date.now());
+        return userSessions.size <= LIMITS.MAX_USERS;
+    } catch (error) {
+        console.error('セッション管理エラー:', error.message);
+        userSessions.add(userId);
+        lastMessageTime.set(userId, Date.now());
+        return userSessions.size <= LIMITS.MAX_USERS;
+    }
+}
+
+// メインイベント処理
+async function handleEvent(event) {
+    if (event.type !== 'message' || event.message.type !== 'text') {
+        console.log(`🔍 イベントスキップ: type=${event.type}, messageType=${event.message?.type}`);
+        return;
+    }
+    
+    const userId = event.source.userId;
+    const userMessage = event.message.text;
+    const replyToken = event.replyToken;
+    
+    try {
+        console.log(`🔍 handleEvent処理開始: ${userId.substring(0, 8)} - "${userMessage}"`);
+        
+        // プロフィール取得
+        const profile = await getUserProfile(userId, client);
+        const userName = profile?.displayName;
+        console.log(`✅ プロフィール取得完了: ${userName || 'Unknown'}`);
+        
+        // ユーザーセッション制限チェック
+        if (!userSessions.has(userId) && userSessions.size >= LIMITS.MAX_USERS) {
+            console.log(`❌ 最大ユーザー数制限に達したため拒否: ${userSessions.size}/${LIMITS.MAX_USERS}`);
+            await client.replyMessage(replyToken, {
+                type: 'text',
+                text: SYSTEM_MESSAGES.maxUsersReached
+            });
+            return;
+        }
+        
+        // セッション管理
+        const sessionAllowed = await manageUserSession(userId);
+        if (!sessionAllowed) {
+            console.log(`❌ 最大ユーザー数制限に達したため拒否`);
+            await client.replyMessage(replyToken, {
+                type: 'text',
+                text: SYSTEM_MESSAGES.maxUsersReached
+            });
+            return;
+        }
+        
+        // 日次制限チェック
+        if (!(await checkDailyLimit(userId))) {
+            console.log(`❌ 日次制限に達したため拒否`);
+            const conversationCount = conversationHistory.get(userId)?.length || 0;
+            const useNameInResponse = shouldUseName(conversationCount);
+            
+            await client.replyMessage(replyToken, {
+                type: 'text',
+                text: SYSTEM_MESSAGES.dailyLimitReached(userName, useNameInResponse)
+            });
+            return;
+        }
+        
+        // 会話履歴取得
+        let history = conversationHistory.get(userId) || [];
+        const conversationCount = history.length + 1;
+        const useNameInResponse = shouldUseName(conversationCount);
+        console.log(`🔍 会話履歴取得完了: ${history.length}件, 名前使用: ${useNameInResponse}`);
+        
+        // 初回ユーザー処理
+        if (history.length === 0) {
+            const welcomeMessage = SYSTEM_MESSAGES.welcome(userName, useNameInResponse);
+            
+            await client.replyMessage(replyToken, {
+                type: 'text',
+                text: welcomeMessage
+            });
+            
+            history.push({ role: 'assistant', content: welcomeMessage });
+            conversationHistory.set(userId, history);
+            
+            await updateDailyUsage(userId);
+            updateDailyMetrics(userId, 'turn');
+            return;
+        }
+        
+        // AI応答生成
+        const aiResponse = await generateAIResponse(userMessage, history, userId, client);
+        let finalResponse = aiResponse;
+        
+        // 使用回数更新・残り回数表示
+        const usageCount = await updateDailyUsage(userId);
+        const remaining = Math.max(0, LIMITS.DAILY_TURN_LIMIT - usageCount);
+        
+        if (remaining <= 3 && remaining > 0) {
+            finalResponse += "\n\n" + SYSTEM_MESSAGES.remainingTurns(remaining, userName, useNameInResponse);
+        }        
+        
+        // 会話履歴更新
+        history.push(
+            { role: 'user', content: userMessage },
+            { role: 'assistant', content: aiResponse }
+        );
+        
+        if (history.length > 20) {
+            history = history.slice(-20);
+        }
+        
+        conversationHistory.set(userId, history);
+        await updateDailyMetrics(userId, 'turn');
+        
+        // 応答送信
+        await client.replyMessage(replyToken, {
+            type: 'text',
+            text: finalResponse
+        });
+        console.log(`✅ 応答送信完了: ${userName || 'Unknown'} (${userId.substring(0, 8)}...) - レスポンス長=${finalResponse.length}文字`);
+        
+    } catch (error) {
+        console.error(`❌ handleEvent エラー詳細:`, {
+            userId: userId.substring(0, 8),
+            userName: await getUserProfile(userId, client).then(p => p?.displayName).catch(() => 'Unknown'),
+            message: userMessage,
+            replyToken: replyToken,
+            errorMessage: error.message,
+            timestamp: new Date().toISOString()
+        });
+        
+        try {
+            await client.replyMessage(replyToken, {
+                type: 'text',
+                text: "申し訳ございません。お話を聞く準備ができませんでした。少し時間をおいてからもう一度お話しかけください。"
+            });
+        } catch (replyError) {
+            console.error('❌ エラー応答送信も失敗:', replyError.message);
+        }
+    }
+}
+
+// 管理機能エンドポイント
 app.get('/', (req, res) => {
-  res.send('AI相談bot (Phase 1) is running! 🤖✨');
+    res.send(`
+        <html>
+        <head>
+            <title>新人・若手メンターBot - 田中修</title>
+            <meta charset="UTF-8">
+        </head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea, #764ba2);">
+            <h1>👨‍💼⭐ 新人・若手メンターBot - 田中修 ⭐👨‍💼</h1>
+            <p>20年の現場経験を持つベテランメンター「田中修」があなたのキャリアをサポートします</p>
+            <p><strong>v1.0.0</strong> - サーバーは正常に稼働しています ✨</p>
+            <div style="margin-top: 30px;">
+                <a href="/health" style="background: #55a3ff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 0 10px;">ヘルスチェック</a>
+                <a href="/admin" style="background: #667eea; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 0 10px;">管理画面</a>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
 app.get('/health', (req, res) => {
-  const today = getTodayString();
-  const todayActiveUsers = Array.from(dailyUsageCounter.entries())
-    .filter(([_, usage]) => usage.date === today).length;
-  
-  const activeSessions = sessionData.size;
-
-  res.json({
-    status: 'ok',
-    version: 'Phase 1 - Foundation',
-    timestamp: new Date().toISOString(),
-    stats: {
-      totalRegisteredUsers: registeredUsers.size,
-      maxUsers: LIMITS.MAX_USERS,
-      todayActiveUsers: todayActiveUsers,
-      activeSessions: activeSessions,
-      dailyTurnLimit: LIMITS.DAILY_TURN_LIMIT,
-      activeConversations: conversationHistory.size,
-      sessionTimeout: `${LIMITS.SESSION_TIMEOUT / 60000} minutes`,
-    },
-  });
+    const today = new Date().toISOString().split('T')[0];
+    const todayStats = stats.dailyMetrics.get(today) || { users: new Set(), turns: 0 };
+    
+    const health = {
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        service: '新人・若手メンターBot - 田中修',
+        version: '1.0.0',
+        uptime: Math.floor(process.uptime()),
+        stats: {
+            totalUsers: stats.totalUsers.size,
+            todayUsers: todayStats.users.size,
+            totalTurns: stats.totalTurns,
+            todayTurns: todayStats.turns,
+            activeSessions: userSessions.size,
+            cachedProfiles: userProfiles.size
+        },
+        limits: {
+            maxUsers: LIMITS.MAX_USERS,
+            dailyTurnLimit: LIMITS.DAILY_TURN_LIMIT
+        },
+        mentor_info: {
+            name: '田中修',
+            experience: '20年',
+            specialties: ['キャリア相談', '人間関係', '業務効率', 'スキル開発'],
+            approach: '実践的で信頼できるアドバイス'
+        },
+        message: '田中修があなたのキャリアサポートで安定稼働中です ✨'
+    };
+    
+    res.json(health);
 });
 
-// 管理者用統計エンドポイント
+app.get('/admin', (req, res) => {
+    const today = new Date().toISOString().split('T')[0];
+    const todayStats = stats.dailyMetrics.get(today) || { users: new Set(), turns: 0 };
+    
+    res.send(`
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { 
+                    font-family: 'Hiragino Sans', 'Yu Gothic', sans-serif; 
+                    margin: 20px; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                }
+                .container { 
+                    max-width: 600px; 
+                    margin: 0 auto; 
+                    background: white; 
+                    padding: 40px; 
+                    border-radius: 20px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                }
+                .header { text-align: center; margin-bottom: 40px; }
+                .status {
+                    background: #00b894;
+                    color: white;
+                    padding: 15px;
+                    border-radius: 10px;
+                    margin: 20px 0;
+                    text-align: center;
+                    font-weight: bold;
+                }
+                .mentor-info {
+                    background: #74b9ff;
+                    color: white;
+                    padding: 20px;
+                    border-radius: 10px;
+                    margin: 20px 0;
+                    text-align: left;
+                }
+                .menu-item {
+                    display: block;
+                    background: linear-gradient(45deg, #667eea, #764ba2);
+                    color: white;
+                    padding: 20px 30px;
+                    margin: 20px 0;
+                    text-decoration: none;
+                    border-radius: 15px;
+                    text-align: center;
+                    font-size: 1.2em;
+                    font-weight: bold;
+                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                }
+                .menu-item:hover {
+                    transform: translateY(-3px);
+                    box-shadow: 0 8px 25px rgba(0,0,0,0.2);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>👨‍💼 田中修 - メンター管理メニュー v1.0.0</h1>
+                    <div class="status">
+                        ✅ v1.0.0 新人・若手メンターBot稼働中！ | 相談者: ${stats.totalUsers.size}名 | 本日: ${todayStats.users.size}名 | 相談: ${stats.totalTurns}回
+                    </div>
+                </div>
+                
+                <div class="mentor-info">
+                    <h3>✨ 田中修プロフィール</h3>
+                    <ul style="margin: 10px 0;">
+                        <li>✅ IT企業20年勤務、現事業部長（200名規模）</li>
+                        <li>✅ 転職経験2回（失敗・成功両方を経験）</li>
+                        <li>✅ 離職率30%→5%改善実績</li>
+                        <li>✅ 新卒・中途採用面接官歴10年</li>
+                    </ul>
+                </div>
+                
+                <a href="/health" class="menu-item">
+                    ❤️ ヘルスチェック
+                </a>
+                
+                <a href="/admin/stats" class="menu-item">
+                    📊 統計ダッシュボード
+                </a>
+                
+                <a href="/test" class="menu-item">
+                    🧪 システムテスト
+                </a>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
 app.get('/admin/stats', (req, res) => {
-  const today = getTodayString();
-  const usageStats = Array.from(dailyUsageCounter.entries())
-    .filter(([_, usage]) => usage.date === today)
-    .map(([userId, usage]) => ({
-      userId: userId.slice(0, 8) + '***', // プライバシー保護
-      count: usage.count,
-      remaining: LIMITS.DAILY_TURN_LIMIT - usage.count
-    }));
-
-  res.json({
-    date: today,
-    systemLimits: LIMITS,
-    stats: {
-      totalUsers: registeredUsers.size,
-      todayActiveUsers: usageStats.length,
-      activeSessions: sessionData.size,
-      activeConversations: conversationHistory.size,
-    },
-    usageBreakdown: usageStats.sort((a, b) => b.count - a.count), // 使用量順
-  });
+    const today = new Date().toISOString().split('T')[0];
+    const todayStats = stats.dailyMetrics.get(today) || { users: new Set(), turns: 0 };
+    
+    const last7Days = [];
+    for (let i = 6; i >= 0; i--) {
+        const date = new Date();
+        date.setDate(date.getDate() - i);
+        const dateStr = date.toISOString().split('T')[0];
+        const dayStats = stats.dailyMetrics.get(dateStr) || { users: new Set(), turns: 0 };
+        
+        last7Days.push({
+            date: dateStr,
+            users: dayStats.users.size,
+            turns: dayStats.turns
+        });
+    }
+    
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>田中修 - メンター統計情報 v1.0.0</title>
+            <meta charset="UTF-8">
+            <style>
+                body { 
+                    font-family: 'Hiragino Sans', 'Yu Gothic', sans-serif; 
+                    margin: 20px; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                }
+                .container { 
+                    max-width: 1000px; 
+                    margin: 0 auto; 
+                    background: white; 
+                    padding: 30px; 
+                    border-radius: 15px;
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                }
+                .header {
+                    text-align: center;
+                    color: white;
+                    margin-bottom: 40px;
+                    background: linear-gradient(45deg, #667eea, #764ba2);
+                    padding: 20px;
+                    border-radius: 10px;
+                }
+                .stats-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 20px;
+                    margin-bottom: 40px;
+                }
+                .stat-card {
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 25px;
+                    border-radius: 15px;
+                    text-align: center;
+                    color: white;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                    transition: transform 0.3s ease;
+                }
+                .stat-card:hover {
+                    transform: translateY(-5px);
+                }
+                .stat-number {
+                    font-size: 2.5em;
+                    font-weight: bold;
+                    margin-bottom: 10px;
+                }
+                .stat-label {
+                    font-size: 1em;
+                    opacity: 0.9;
+                }
+                .mentor-features {
+                    background: #74b9ff;
+                    color: white;
+                    padding: 20px;
+                    border-radius: 10px;
+                    margin-bottom: 20px;
+                }
+                .daily-stats {
+                    background: white;
+                    border: 2px solid #667eea;
+                    border-radius: 15px;
+                    overflow: hidden;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+                }
+                .daily-stats h3 {
+                    background: linear-gradient(45deg, #667eea, #764ba2);
+                    color: white;
+                    margin: 0;
+                    padding: 20px;
+                    text-align: center;
+                }
+                table {
+                    width: 100%;
+                    border-collapse: collapse;
+                }
+                th, td {
+                    padding: 15px;
+                    text-align: center;
+                    border-bottom: 1px solid #f1f2f6;
+                }
+                th {
+                    background-color: #f8f9fa;
+                    font-weight: bold;
+                    color: #2d3436;
+                }
+                tr:hover {
+                    background-color: #e6ecff;
+                }
+                .footer {
+                    text-align: center; 
+                    margin-top: 40px; 
+                    color: #636e72;
+                    background: #f1f2f6;
+                    padding: 20px;
+                    border-radius: 10px;
+                }
+                .back-button {
+                    background: #667eea;
+                    color: white;
+                    padding: 10px 20px;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                    display: inline-block;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>👨‍💼 田中修 - メンター統計情報 v1.0.0 👨‍💼</h1>
+                    <p>最終更新: ${new Date().toLocaleString('ja-JP')}</p>
+                </div>
+                
+                <div class="mentor-features">
+                    <h3>✨ メンター田中修の特徴</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 15px;">
+                        <div>
+                            <strong>経験・実績:</strong>
+                            <ul style="margin: 5px 0; text-align: left;">
+                                <li>✅ IT企業20年勤務経験</li>
+                                <li>✅ 現事業部長（200名規模）</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <strong>専門領域:</strong>
+                            <ul style="margin: 5px 0; text-align: left;">
+                                <li>✅ キャリア相談・人間関係</li>
+                                <li>✅ 業務効率・スキル開発</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-number">${stats.totalUsers.size}</div>
+                        <div class="stat-label">👥 総相談者数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${todayStats.users.size}</div>
+                        <div class="stat-label">📅 本日の相談者</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${stats.totalTurns}</div>
+                        <div class="stat-label">💬 総相談回数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${todayStats.users.size > 0 ? (todayStats.turns / todayStats.users.size).toFixed(1) : 0}</div>
+                        <div class="stat-label">📊 平均相談数/人</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${userProfiles.size}</div>
+                        <div class="stat-label">👤 登録済みユーザー</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${userSessions.size}</div>
+                        <div class="stat-label">🔄 アクティブセッション</div>
+                    </div>
+                </div>
+                
+                <div class="daily-stats">
+                    <h3>📊 過去7日間の相談実績</h3>
+                    <table>
+                        <tr>
+                            <th>📅 日付</th>
+                            <th>👥 相談者数</th>
+                            <th>💬 相談回数</th>
+                            <th>📈 平均相談数</th>
+                        </tr>
+                        ${last7Days.map(day => `
+                            <tr>
+                                <td>${day.date}</td>
+                                <td>${day.users}</td>
+                                <td>${day.turns}</td>
+                                <td>${day.users > 0 ? (day.turns / day.users).toFixed(1) : 0}</td>
+                            </tr>
+                        `).join('')}
+                    </table>
+                </div>
+                
+                <div class="footer">
+                    <p>👨‍💼 田中修v1.0.0が新人・若手のキャリアサポートで安定稼働中です 👨‍💼</p>
+                    <p style="font-size: 0.9em; margin-top: 15px;">
+                        システム稼働時間: ${Math.floor(process.uptime() / 3600)}時間${Math.floor((process.uptime() % 3600) / 60)}分
+                    </p>
+                    <a href="/admin" class="back-button">管理メニューに戻る</a>
+                </div>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
-// セキュリティ手動クリーンアップ（管理者用）
-app.post('/admin/cleanup', express.json(), (req, res) => {
-  const beforeCount = conversationHistory.size;
-  cleanupExpiredSessions();
-  const afterCount = conversationHistory.size;
-  
-  res.json({
-    message: 'Cleanup completed',
-    cleaned: beforeCount - afterCount,
-    remaining: afterCount
-  });
-});
-    // ABテスト統計表示
-    app.get('/admin/ab-stats', (req, res) => {
-      try {
-          const totalStats = {
-            A: { users: 0, totalTurns: 0, avgTurns: 0, newSessions: 0, purifications: 0 },
-            B: { users: 0, totalTurns: 0, avgTurns: 0, newSessions: 0, purifications: 0 }
-          };
-    
-     // ユーザー統計集計
-  for (const [userId, stats] of abTestStats.entries()) {
-    const group = stats.group;
-    totalStats[group].users++;
-    totalStats[group].totalTurns += stats.metrics.totalTurns || 0;
-    totalStats[group].newSessions += stats.metrics.sessionsStarted || 0;
-    totalStats[group].purifications += stats.metrics.purificationUsed || 0;
-  }
-    
-    // 平均計算
-    totalStats.A.avgTurns = totalStats.A.users > 0 ? 
-      (totalStats.A.totalTurns / totalStats.A.users).toFixed(2) : 0;
-    totalStats.B.avgTurns = totalStats.B.users > 0 ? 
-      (totalStats.B.totalTurns / totalStats.B.users).toFixed(2) : 0;
-    
-    // 日次統計（直近7日）
-    const dailyStatsArray = Array.from(dailyMetrics.entries())
-      .map(([date, stats]) => ({
-        date,
-        A_users: stats.A.users.size,
-        A_turns: stats.A.turns,
-        B_users: stats.B.users.size,
-        B_turns: stats.B.turns
-      }))
-      .sort((a, b) => b.date.localeCompare(a.date))
-      .slice(0, 7);
-    
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>ABテスト統計</title>
-        <meta charset="utf-8">
-        <style>
-          body { font-family: -apple-system, sans-serif; margin: 20px; }
-          table { border-collapse: collapse; margin: 10px 0; width: 100%; }
-          th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-          th { background-color: #f2f2f2; }
-          .metric { background: #f9f9f9; padding: 10px; margin: 10px 0; border-radius: 5px; }
-          .status { color: ${AB_TEST_CONFIG.ENABLED ? 'green' : 'red'}; font-weight: bold; }
-        </style>
-      </head>
-      <body>
-        <h1>📊 ABテスト統計 Dashboard</h1>
-        
-        <div class="metric">
-          <strong>🎯 ステータス:</strong> 
-          <span class="status">${AB_TEST_CONFIG.ENABLED ? '✅ 実行中' : '❌ 停止中'}</span>
-          <br><strong>📅 最終更新:</strong> ${new Date().toLocaleString('ja-JP')}
-        </div>
-        
-        <h2>📈 グループ別サマリー</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>グループ</th>
-              <th>ユーザー数</th>
-              <th>総ターン数</th>
-              <th>平均ターン/人</th>
-              <th>新規セッション</th>
-              <th>お焚き上げ使用</th>
-            </tr>
-          </thead>
-          <tbody>
-           <tr>
-            <td><strong>A (Control)</strong></td>
-            <td>${totalStats.A.users}</td>
-            <td>${totalStats.A.totalTurns}</td>
-            <td>${totalStats.A.avgTurns}</td>
-            <td>${totalStats.A.newSessions}</td>
-            <td>-</td>
-          </tr>
-          <tr>
-            <td><strong>B (Treatment)</strong></td>
-            <td>${totalStats.B.users}</td>
-            <td>${totalStats.B.totalTurns}</td>
-            <td>${totalStats.B.avgTurns}</td>
-            <td>${totalStats.B.newSessions}</td>
-            <td>${totalStats.B.purifications}</td>
-          </tr>
-          </tbody>
-        </table>
-        
-        <h2>📅 日次推移（直近7日）</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>日付</th>
-              <th>A-ユーザー</th>
-              <th>A-ターン</th>
-              <th>B-ユーザー</th>
-              <th>B-ターン</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${dailyStatsArray.map(stats => `
-              <tr>
-                <td>${stats.date}</td>
-                <td>${stats.A_users}</td>
-                <td>${stats.A_turns}</td>
-                <td>${stats.B_users}</td>
-                <td>${stats.B_turns}</td>
-              </tr>
-            `).join('')}
-            ${dailyStatsArray.length === 0 ? '<tr><td colspan="5">データなし</td></tr>' : ''}
-          </tbody>
-        </table>
-        
-        <div class="metric">
-          <strong>⚙️ 設定情報</strong><br>
-          分割比率: A:B = ${AB_TEST_CONFIG.SPLIT_RATIO}:${100-AB_TEST_CONFIG.SPLIT_RATIO}<br>
-          総登録ユーザー: ${registeredUsers.size}/${LIMITS.MAX_USERS}
-        </div>
-        
-        <p><a href="/admin/stats">← 基本統計に戻る</a></p>
-      </body>
-      </html>
-    `;
-    
-    res.send(html);
-  } catch (error) {
-    console.error('AB Stats error:', error);
-    res.status(500).send('Error loading AB test statistics');
-  }
-});
-
-// ABテスト切り替えAPI
-app.post('/admin/toggle-ab', express.json(), (req, res) => {
-  try {
-    AB_TEST_CONFIG.ENABLED = !AB_TEST_CONFIG.ENABLED;
-    console.log(`🎲 AB Test ${AB_TEST_CONFIG.ENABLED ? 'ENABLED' : 'DISABLED'}`);
-    
-    res.json({ 
-      success: true, 
-      enabled: AB_TEST_CONFIG.ENABLED,
-      message: `ABテスト${AB_TEST_CONFIG.ENABLED ? '有効' : '無効'}に変更しました`
+app.get('/test', (req, res) => {
+    res.json({
+        message: '田中修v1.0.0は新人・若手メンターとして安定稼働しています！',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        webhook_url: req.get('host') + '/webhook',
+        environment_check: {
+            line_secret: !!process.env.LINE_CHANNEL_SECRET,
+            line_token: !!process.env.LINE_CHANNEL_ACCESS_TOKEN,
+            openai_key: !!process.env.OPENAI_API_KEY,
+            airtable_key: !!process.env.AIRTABLE_API_KEY,
+            airtable_base: !!process.env.AIRTABLE_BASE_ID
+        },
+        mentor_profile: {
+            name: '田中修',
+            age: 45,
+            experience: '20年',
+            current_position: '事業部長（200名規模）',
+            specialties: ['キャリア相談', '人間関係', '業務効率', 'スキル開発'],
+            approach: '実践的で信頼できるアドバイス'
+        }
     });
-  } catch (error) {
-    console.error('Toggle AB error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
 });
 
-// ==============================
-// サーバー起動
-// ==============================
-app.listen(config.port, () => {
-  console.log(`🚀 AI相談bot (Phase 1) started on port ${config.port}`);
-  console.log(`📱 Webhook URL: https://your-app.onrender.com/webhook`);
-  console.log(`👥 Max users: ${LIMITS.MAX_USERS}, Daily limit: ${LIMITS.DAILY_TURN_LIMIT} turns/user`);
-  console.log(`🔒 Session timeout: ${LIMITS.SESSION_TIMEOUT / 60000} minutes`);
-  console.log(`🧹 Cleanup interval: ${LIMITS.CLEANUP_INTERVAL / 60000} minutes`);
-});
-
-// ==============================
-// エラーハンドリング
-// ==============================
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+// サーバー開始
+const PORT = process.env.PORT || 3000;
+console.log('使用量データを読み込み中...');
+loadUsageData();
+app.listen(PORT, () => {
+    console.log('👨‍💼⭐ 新人・若手メンターBot「田中修」v1.0.0が起動しました ⭐👨‍💼');
+    console.log(`ポート: ${PORT}`);
+    console.log(`環境: ${process.env.NODE_ENV || 'development'}`);
+    console.log('');
+    console.log('=== 🏢 システム情報 ===');
+    console.log(`最大ユーザー数: ${LIMITS.MAX_USERS}名`);
+    console.log(`1日の制限: ${LIMITS.DAILY_TURN_LIMIT}ターン`);
+    console.log(`セッション時間: ${LIMITS.SESSION_TIMEOUT / 60000}分`);
+    console.log(`クリーンアップ間隔: ${LIMITS.CLEANUP_INTERVAL / 60000}分`);
+    console.log('');
+    console.log('=== 👨‍💼 メンタープロフィール ===');
+    console.log('• 名前: 田中修（45歳）');
+    console.log('• 経歴: IT企業20年勤務、現事業部長');
+    console.log('• 実績: 離職率30%→5%改善、面接官歴10年');
+    console.log('• 専門: キャリア相談、人間関係、業務効率');
+    console.log('• 方針: 実践的で信頼できるアドバイス');
+    console.log('====================================');
+    console.log('');
+    console.log('=== 🎯 サービス目標 ===');
+    console.log('• 新人・若手の悩み解決率向上');
+    console.log('• 平均相談ターン数: 目標3-5ターン');
+    console.log('• ユーザー継続率: 翌日再利用率測定');
+    console.log('• メンター品質: 実践的で信頼できる応答');
+    console.log('========================');
+    console.log('');
+    console.log('田中修が新人・若手の皆さんをお待ちしています... 👨‍💼');
+    
+    // 起動時の環境変数チェック
+    const requiredEnvs = ['LINE_CHANNEL_SECRET', 'LINE_CHANNEL_ACCESS_TOKEN', 'OPENAI_API_KEY'];
+    const optionalEnvs = ['AIRTABLE_API_KEY', 'AIRTABLE_BASE_ID'];
+    const missingEnvs = requiredEnvs.filter(env => !process.env[env]);
+    const missingOptionalEnvs = optionalEnvs.filter(env => !process.env[env]);
+    
+    if (missingEnvs.length > 0) {
+        console.error('❌ 不足している必須環境変数:', missingEnvs.join(', '));
+        console.error('Renderの環境変数設定を確認してください');
+    } else {
+        console.log('✅ 必須環境変数設定完了');
+    }
+    
+    if (missingOptionalEnvs.length > 0) {
+        console.log('⚠️ オプション環境変数未設定:', missingOptionalEnvs.join(', '));
+        console.log('Airtable機能を使用する場合は設定してください');
+    } else {
+        console.log('✅ Airtable環境変数設定完了');
+    }
+    
+    console.log('');
+    console.log('🎉 田中修v1.0.0は新人・若手メンターとして準備完了しました！');
 });
