@@ -1,7 +1,7 @@
 {
   "name": "ai-counselor-line-bot",
   "version": "1.0.0",
-  "description": "LINE AI相談bot - MVP版",
+  "description": "LINE新人・若手メンターbot - 田中修があなたのキャリアをサポート",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -10,7 +10,9 @@
   "dependencies": {
     "@line/bot-sdk": "^8.0.0",
     "express": "^4.18.2",
-    "openai": "^4.20.0"
+    "openai": "^4.20.0",
+    "airtable": "^0.12.2",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"
@@ -22,7 +24,11 @@
     "line",
     "bot",
     "ai",
-    "counseling",
+    "mentor",
+    "career",
+    "junior",
+    "workplace",
+    "guidance",
     "openai"
   ],
   "author": "Your Name",
