@@ -15,7 +15,7 @@ function getJSTDate() {
     const year = jstDate.getFullYear();
     const month = jstDate.getMonth() + 1;
     const day = jstDate.getDate();
-    return `${year}/${month}/${day}`; // スラッシュ形式でAirtableの実データに合わせる
+    return `${year}/${month}/${day}`;
 }
 
 // データ保存関数
