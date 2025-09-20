@@ -68,7 +68,7 @@ async function getUserLimitRecord(userId) {
         
         // 正確な検索条件で検索
         const records = await airtableBase('user_limits').select({
-            filterByFormula: `AND({user_id}="${userId}", {date}="${today}")`,
+            filterByFormula: `AND(user_id="${userId}", date="${today}")`,
             maxRecords: 1
         }).firstPage();
         
