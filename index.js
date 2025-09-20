@@ -50,69 +50,54 @@ const airtableBase = new Airtable({
     apiKey: process.env.AIRTABLE_API_KEY
 }).base(process.env.AIRTABLE_BASE_ID);
 
-// ユーザー制限レコード取得関数
+// 修正版: つきみのロジックを田中修に適用
 async function getUserLimitRecord(userId) {
     try {
-        const today = getJSTDate(); // 2025/9/20 形式
+        const today = getJSTDate();
         console.log(`🔍 制限レコード検索開始: userId=${userId.substring(0,8)}, date=${today}`);
         
-        // デバッグ: まず実際のフィールド構造を確認
-        const sampleRecords = await airtableBase('user_limits').select({
-            maxRecords: 3
-        }).firstPage();
+        // 複数のフィルターパターンを試行（つきみと同様）
+        const filterPatterns = [
+            `AND({user_id}="${userId}", {date}="${today}")`,
+            `AND(user_id="${userId}", date="${today}")`,
+            `{user_id}="${userId}"`
+        ];
         
-        if (sampleRecords.length > 0) {
-            console.log('📋 実際のフィールド構造:', Object.keys(sampleRecords[0].fields));
-            console.log('📊 サンプルレコード:', sampleRecords[0].fields);
-        }
-        
-        // 正確な検索条件で検索
-        const records = await airtableBase('user_limits').select({
-            filterByFormula: `AND(user_id="${userId}", date="${today}")`,
-            maxRecords: 1
-        }).firstPage();
-        
-        if (records.length > 0) {
-            console.log(`✅ 今日のレコード発見: ID=${records[0].id}`);
-            console.log(`📊 レコード内容:`, records[0].fields);
-            return records[0];
-        }
-        
-        console.log(`🆕 今日のレコードが見つからない - フォールバック検索実行`);
-        
-        // フォールバック: ユーザーIDのみで検索して日付を手動比較
-        const userRecords = await airtableBase('user_limits').select({
-            filterByFormula: `{user_id}="${userId}"`,
-            sort: [{field: 'date', direction: 'desc'}],
-            maxRecords: 10
-        }).firstPage();
-        
-        console.log(`📋 ユーザーの全レコード数: ${userRecords.length}`);
-        
-        if (userRecords.length > 0) {
-            userRecords.forEach((record, index) => {
-                console.log(`📊 レコード${index + 1}: date="${record.fields.date}", turn_count=${record.fields.turn_count}`);
-            });
+        for (let i = 0; i < filterPatterns.length; i++) {
+            const pattern = filterPatterns[i];
+            console.log(`🔍 フィルターパターン${i + 1}: ${pattern}`);
             
-            // 今日の日付と一致するレコードを探す
-            const todayRecord = userRecords.find(record => {
-                const recordDate = record.fields.date;
-                console.log(`📅 日付比較: "${recordDate}" vs "${today}"`);
-                return recordDate === today;
-            });
-            
-            if (todayRecord) {
-                console.log(`✅ 今日のレコード発見（フォールバック）: ID=${todayRecord.id}`);
-                return todayRecord;
+            try {
+                const records = await airtableBase('user_limits').select({
+                    filterByFormula: pattern,
+                    maxRecords: 5
+                }).firstPage();
+                
+                console.log(`📝 パターン${i + 1}の検索結果: ${records.length}件`);
+                
+                if (records.length > 0) {
+                    // 今日のレコードを探す
+                    for (const record of records) {
+                        const recordDate = record.fields.date;
+                        console.log(`📅 レコード日付チェック: "${recordDate}" vs "${today}"`);
+                        
+                        if (recordDate === today) {
+                            console.log(`✅ 今日のレコード発見: ID=${record.id}`);
+                            return record;
+                        }
+                    }
+                }
+                
+            } catch (filterError) {
+                console.log(`❌ パターン${i + 1}エラー: ${filterError.message}`);
             }
         }
         
-        console.log(`🆕 すべての検索で今日のレコードが見つからない`);
+        console.log(`🆕 すべてのパターンで今日のレコードが見つからない`);
         return null;
         
     } catch (error) {
         console.error('❌ ユーザー制限レコード取得エラー:', error.message);
-        console.error('❌ エラー詳細:', error);
         return null;
     }
 }
