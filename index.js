@@ -11,11 +11,7 @@ const DATA_FILE = path.join(__dirname, 'usage_data.json');
 
 // JST日付取得関数
 function getJSTDate() {
-    const jstDate = new Date(Date.now() + (9 * 60 * 60 * 1000));
-    const year = jstDate.getFullYear();
-    const month = jstDate.getMonth() + 1;
-    const day = jstDate.getDate();
-    return `${year}/${month}/${day}`;
+    return new Date(Date.now() + (9 * 60 * 60 * 1000)).toISOString().split('T')[0];
 }
 
 // データ保存関数
