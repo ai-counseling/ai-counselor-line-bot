@@ -11,7 +11,11 @@ const DATA_FILE = path.join(__dirname, 'usage_data.json');
 
 // JST日付取得関数
 function getJSTDate() {
-    return new Date(Date.now() + (9 * 60 * 60 * 1000)).toISOString().split('T')[0];
+    const jstDate = new Date(Date.now() + (9 * 60 * 60 * 1000));
+    const year = jstDate.getFullYear();
+    const month = jstDate.getMonth() + 1;
+    const day = jstDate.getDate();
+    return `${year}/${month}/${day}`; // スラッシュ形式でAirtableの実データに合わせる
 }
 
 // データ保存関数
@@ -49,8 +53,18 @@ const airtableBase = new Airtable({
 // ユーザー制限レコード取得関数
 async function getUserLimitRecord(userId) {
     try {
-        const today = getJSTDate(); // 2025/9/18 形式
+        const today = getJSTDate(); // 2025/9/20 形式
         console.log(`🔍 制限レコード検索開始: userId=${userId.substring(0,8)}, date=${today}`);
+        
+        // デバッグ: まず実際のフィールド構造を確認
+        const sampleRecords = await airtableBase('user_limits').select({
+            maxRecords: 3
+        }).firstPage();
+        
+        if (sampleRecords.length > 0) {
+            console.log('📋 実際のフィールド構造:', Object.keys(sampleRecords[0].fields));
+            console.log('📊 サンプルレコード:', sampleRecords[0].fields);
+        }
         
         // 正確な検索条件で検索
         const records = await airtableBase('user_limits').select({
@@ -64,7 +78,36 @@ async function getUserLimitRecord(userId) {
             return records[0];
         }
         
-        console.log(`🆕 今日のレコードが見つからない`);
+        console.log(`🆕 今日のレコードが見つからない - フォールバック検索実行`);
+        
+        // フォールバック: ユーザーIDのみで検索して日付を手動比較
+        const userRecords = await airtableBase('user_limits').select({
+            filterByFormula: `{user_id}="${userId}"`,
+            sort: [{field: 'date', direction: 'desc'}],
+            maxRecords: 10
+        }).firstPage();
+        
+        console.log(`📋 ユーザーの全レコード数: ${userRecords.length}`);
+        
+        if (userRecords.length > 0) {
+            userRecords.forEach((record, index) => {
+                console.log(`📊 レコード${index + 1}: date="${record.fields.date}", turn_count=${record.fields.turn_count}`);
+            });
+            
+            // 今日の日付と一致するレコードを探す
+            const todayRecord = userRecords.find(record => {
+                const recordDate = record.fields.date;
+                console.log(`📅 日付比較: "${recordDate}" vs "${today}"`);
+                return recordDate === today;
+            });
+            
+            if (todayRecord) {
+                console.log(`✅ 今日のレコード発見（フォールバック）: ID=${todayRecord.id}`);
+                return todayRecord;
+            }
+        }
+        
+        console.log(`🆕 すべての検索で今日のレコードが見つからない`);
         return null;
         
     } catch (error) {
@@ -74,10 +117,10 @@ async function getUserLimitRecord(userId) {
     }
 }
 
-// レコード作成/更新関数
+// 修正版: createOrUpdateUserLimit関数
 async function createOrUpdateUserLimit(userId, turnCount) {
     try {
-        const today = getJSTDate(); // 2025/9/18 形式
+        const today = getJSTDate(); // 2025/9/20 形式
         console.log(`🔄 制限レコード更新開始: userId=${userId.substring(0,8)}, newCount=${turnCount}`);
         
         const existingRecord = await getUserLimitRecord(userId);
@@ -97,16 +140,22 @@ async function createOrUpdateUserLimit(userId, turnCount) {
         } else {
             console.log(`🆕 新規レコード作成: カウント=${turnCount}`);
             
-            // 重複作成防止のため、作成前にもう一度チェック
+            // 重複作成防止のため、作成前にもう一度チェック（簡略化）
             const doubleCheckRecord = await getUserLimitRecord(userId);
             if (doubleCheckRecord) {
                 console.log(`⚠️ 重複作成回避: レコードが既に存在していました`);
-                return await createOrUpdateUserLimit(userId, turnCount); // 再帰的に更新処理
+                // 無限ループ防止のため、更新処理を直接実行
+                const updatedRecord = await airtableBase('user_limits').update(doubleCheckRecord.id, {
+                    turn_count: turnCount,
+                    last_updated: new Date().toISOString()
+                });
+                console.log(`✅ 制限レコード更新完了（重複回避）: ID=${updatedRecord.id}, 新カウント=${turnCount}`);
+                return true;
             }
             
             const newRecord = await airtableBase('user_limits').create({
                 user_id: userId,
-                date: today, // 2025/9/18 形式で保存
+                date: today, // 2025/9/20 形式で保存
                 turn_count: turnCount,
                 last_updated: new Date().toISOString()
             });
@@ -122,8 +171,7 @@ async function createOrUpdateUserLimit(userId, turnCount) {
     }
 }
 
-
-// 使用量更新関数
+// 修正版: 使用量更新関数
 async function updateDailyUsage(userId) {
     try {
         console.log(`📊 使用量更新開始: userId=${userId.substring(0,8)}`);
@@ -149,6 +197,7 @@ async function updateDailyUsage(userId) {
         return 1;
     }
 }
+
 
 // データ読み込み関数
 function loadUsageData() {
@@ -501,7 +550,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
     }
 });
 
-// 制限チェック関数
+// 修正版: 制限チェック関数
 async function checkDailyLimit(userId) {
     try {
         const record = await getUserLimitRecord(userId);
