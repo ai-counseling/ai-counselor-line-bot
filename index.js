@@ -1,4 +1,4 @@
-// 新人・若手メンターBot「田中修」- v1.0.0 - 完全版
+// 新人・若手メンターBot「斎藤修」- v1.0.0 - 完全版
 require('dotenv').config();
 const express = require('express');
 const line = require('@line/bot-sdk');
@@ -46,7 +46,7 @@ const airtableBase = new Airtable({
     apiKey: process.env.AIRTABLE_API_KEY
 }).base(process.env.AIRTABLE_BASE_ID);
 
-// 修正版: つきみのロジックを田中修に適用
+// 修正版: つきみのロジックを斎藤修に適用
 async function getUserLimitRecord(userId) {
     try {
         const today = getJSTDate();
@@ -295,10 +295,10 @@ async function getMentorPersonality(userName, userId, useNameInResponse) {
     const remainingTurns = await getRemainingTurns(userId);
     const nameDisplay = (userName && useNameInResponse) ? `${userName}さん` : 'あなた';
     return `
-あなたは「田中修（たなか おさむ）」という45歳のベテランメンターです。
+あなたは「斎藤修（たなか おさむ）」という45歳のベテランメンターです。
 
 【基本プロフィール】
-- 名前: 田中修（45歳）
+- 名前: 斎藤修（45歳）
 - 経歴: IT企業で20年勤務、現在は200名規模の事業部を統括
 - 転職経験: 2回（失敗・成功両方を経験）
 - 専門性: システム開発15年 → チームリーダー → 部長 → 事業部長
@@ -454,7 +454,7 @@ async function generateAIResponse(message, history, userId, client) {
 const SYSTEM_MESSAGES = {
     welcome: (userName, useNameInResponse) => {
         const greetings = [
-            `${userName ? userName + 'さん、' : ''}こんにちは。田中と申します。今日はどのようなことでお悩みでしょうか？`,
+            `${userName ? userName + 'さん、' : ''}こんにちは。斎藤と申します。今日はどのようなことでお悩みでしょうか？`,
             `${userName ? userName + 'さん、' : ''}お疲れさまです。何かお困りのことがありましたら、お気軽にご相談ください。`,
             `${userName ? userName + 'さん、' : ''}今日はどのようなことでお話ししましょうか？どんな小さなことでも構いません。`
         ];
@@ -726,12 +726,12 @@ app.get('/', (req, res) => {
     res.send(`
         <html>
         <head>
-            <title>新人・若手メンターBot - 田中修</title>
+            <title>新人・若手メンターBot - 斎藤修</title>
             <meta charset="UTF-8">
         </head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea, #764ba2);">
-            <h1>👨‍💼⭐ 新人・若手メンターBot - 田中修 ⭐👨‍💼</h1>
-            <p>20年の現場経験を持つベテランメンター「田中修」があなたのキャリアをサポートします</p>
+            <h1>👨‍💼⭐ 新人・若手メンターBot - 斎藤修 ⭐👨‍💼</h1>
+            <p>20年の現場経験を持つベテランメンター「斎藤修」があなたのキャリアをサポートします</p>
             <p><strong>v1.0.0</strong> - サーバーは正常に稼働しています ✨</p>
             <div style="margin-top: 30px;">
                 <a href="/health" style="background: #55a3ff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 0 10px;">ヘルスチェック</a>
@@ -749,7 +749,7 @@ app.get('/health', (req, res) => {
     const health = {
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        service: '新人・若手メンターBot - 田中修',
+        service: '新人・若手メンターBot - 斎藤修',
         version: '1.0.0',
         uptime: Math.floor(process.uptime()),
         stats: {
@@ -765,12 +765,12 @@ app.get('/health', (req, res) => {
             dailyTurnLimit: LIMITS.DAILY_TURN_LIMIT
         },
         mentor_info: {
-            name: '田中修',
+            name: '斎藤修',
             experience: '20年',
             specialties: ['キャリア相談', '人間関係', '業務効率', 'スキル開発'],
             approach: '実践的で信頼できるアドバイス'
         },
-        message: '田中修があなたのキャリアサポートで安定稼働中です ✨'
+        message: '斎藤修があなたのキャリアサポートで安定稼働中です ✨'
     };
     
     res.json(health);
@@ -840,14 +840,14 @@ app.get('/admin', (req, res) => {
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>👨‍💼 田中修 - メンター管理メニュー v1.0.0</h1>
+                    <h1>👨‍💼 斎藤修 - メンター管理メニュー v1.0.0</h1>
                     <div class="status">
                         ✅ v1.0.0 新人・若手メンターBot稼働中！ | 相談者: ${stats.totalUsers.size}名 | 本日: ${todayStats.users.size}名 | 相談: ${stats.totalTurns}回
                     </div>
                 </div>
                 
                 <div class="mentor-info">
-                    <h3>✨ 田中修プロフィール</h3>
+                    <h3>✨ 斎藤修プロフィール</h3>
                     <ul style="margin: 10px 0;">
                         <li>✅ IT企業20年勤務、現事業部長（200名規模）</li>
                         <li>✅ 転職経験2回（失敗・成功両方を経験）</li>
@@ -895,7 +895,7 @@ app.get('/admin/stats', (req, res) => {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>田中修 - メンター統計情報 v1.0.0</title>
+            <title>斎藤修 - メンター統計情報 v1.0.0</title>
             <meta charset="UTF-8">
             <style>
                 body { 
@@ -1007,12 +1007,12 @@ app.get('/admin/stats', (req, res) => {
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>👨‍💼 田中修 - メンター統計情報 v1.0.0 👨‍💼</h1>
+                    <h1>👨‍💼 斎藤修 - メンター統計情報 v1.0.0 👨‍💼</h1>
                     <p>最終更新: ${new Date().toLocaleString('ja-JP')}</p>
                 </div>
                 
                 <div class="mentor-features">
-                    <h3>✨ メンター田中修の特徴</h3>
+                    <h3>✨ メンター斎藤修の特徴</h3>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 15px;">
                         <div>
                             <strong>経験・実績:</strong>
@@ -1079,7 +1079,7 @@ app.get('/admin/stats', (req, res) => {
                 </div>
                 
                 <div class="footer">
-                    <p>👨‍💼 田中修v1.0.0が新人・若手のキャリアサポートで安定稼働中です 👨‍💼</p>
+                    <p>👨‍💼 斎藤修v1.0.0が新人・若手のキャリアサポートで安定稼働中です 👨‍💼</p>
                     <p style="font-size: 0.9em; margin-top: 15px;">
                         システム稼働時間: ${Math.floor(process.uptime() / 3600)}時間${Math.floor((process.uptime() % 3600) / 60)}分
                     </p>
@@ -1093,7 +1093,7 @@ app.get('/admin/stats', (req, res) => {
 
 app.get('/test', (req, res) => {
     res.json({
-        message: '田中修v1.0.0は新人・若手メンターとして安定稼働しています！',
+        message: '斎藤修v1.0.0は新人・若手メンターとして安定稼働しています！',
         version: '1.0.0',
         timestamp: new Date().toISOString(),
         webhook_url: req.get('host') + '/webhook',
@@ -1105,7 +1105,7 @@ app.get('/test', (req, res) => {
             airtable_base: !!process.env.AIRTABLE_BASE_ID
         },
         mentor_profile: {
-            name: '田中修',
+            name: '斎藤修',
             age: 45,
             experience: '20年',
             current_position: '事業部長（200名規模）',
@@ -1120,7 +1120,7 @@ const PORT = process.env.PORT || 3000;
 console.log('使用量データを読み込み中...');
 loadUsageData();
 app.listen(PORT, () => {
-    console.log('👨‍💼⭐ 新人・若手メンターBot「田中修」v1.0.0が起動しました ⭐👨‍💼');
+    console.log('👨‍💼⭐ 新人・若手メンターBot「斎藤修」v1.0.0が起動しました ⭐👨‍💼');
     console.log(`ポート: ${PORT}`);
     console.log(`環境: ${process.env.NODE_ENV || 'development'}`);
     console.log('');
@@ -1131,7 +1131,7 @@ app.listen(PORT, () => {
     console.log(`クリーンアップ間隔: ${LIMITS.CLEANUP_INTERVAL / 60000}分`);
     console.log('');
     console.log('=== 👨‍💼 メンタープロフィール ===');
-    console.log('• 名前: 田中修（45歳）');
+    console.log('• 名前: 斎藤修（45歳）');
     console.log('• 経歴: IT企業20年勤務、現事業部長');
     console.log('• 実績: 離職率30%→5%改善、面接官歴10年');
     console.log('• 専門: キャリア相談、人間関係、業務効率');
@@ -1145,7 +1145,7 @@ app.listen(PORT, () => {
     console.log('• メンター品質: 実践的で信頼できる応答');
     console.log('========================');
     console.log('');
-    console.log('田中修が新人・若手の皆さんをお待ちしています... 👨‍💼');
+    console.log('斎藤修が新人・若手の皆さんをお待ちしています... 👨‍💼');
     
     // 起動時の環境変数チェック
     const requiredEnvs = ['LINE_CHANNEL_SECRET', 'LINE_CHANNEL_ACCESS_TOKEN', 'OPENAI_API_KEY'];
@@ -1168,5 +1168,5 @@ app.listen(PORT, () => {
     }
     
     console.log('');
-    console.log('🎉 田中修v1.0.0は新人・若手メンターとして準備完了しました！');
+    console.log('🎉 斎藤修v1.0.0は新人・若手メンターとして準備完了しました！');
 });
