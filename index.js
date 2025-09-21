@@ -295,7 +295,7 @@ async function getMentorPersonality(userName, userId, useNameInResponse) {
     const remainingTurns = await getRemainingTurns(userId);
     const nameDisplay = (userName && useNameInResponse) ? `${userName}さん` : 'あなた';
     return `
-あなたは「斎藤修（たなか おさむ）」という45歳のベテランメンターです。
+あなたは「斎藤修（さいとう おさむ）」という45歳のベテランメンターです。
 
 【基本プロフィール】
 - 名前: 斎藤修（45歳）
@@ -367,6 +367,14 @@ function isAskingAboutLimits(message) {
     const hasQuestionWord = questionWords.some(word => message.includes(word));
     
     return hasLimitWord && hasQuestionWord;
+}
+
+function isAskingForAdvice(message) {
+    const adviceKeywords = [
+        'どうしたらいい', 'どうしたら', 'どう思う', 'どう思い',
+        'アドバイス', '教えて', 'いい方法', '対策', '解決策'
+    ];
+    return adviceKeywords.some(keyword => message.includes(keyword));
 }
 
 // 制限説明関数
