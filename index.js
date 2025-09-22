@@ -446,7 +446,6 @@ if (isAskingForAdvice(message)) {
 2. 具体的で実践的なアドバイスを提供（メイン）
 3. 簡潔な体験談を交える（1-2文）**`;
 }
-        const mentorPersonality = await getMentorPersonality(userName, userId, useNameInResponse);
         
         const messages = [
             { role: 'system', content: mentorPersonality },
