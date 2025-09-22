@@ -489,7 +489,6 @@ if (isAskingForAdvice(message)) {
 if (aiResponse.length > 100) {
     aiResponse = aiResponse.replace(/。\s*([^。]{50,})/g, '。\n\n$1');
 }
-        }
         
         console.log(`AI応答生成完了: レスポンス長=${aiResponse.length}文字`);
         
