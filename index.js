@@ -350,7 +350,13 @@ async function getMentorPersonality(userName, userId, useNameInResponse) {
 - ユーザーは1日10回まで相談可能（現在残り${remainingTurns}回）
 - 制限について聞かれたら「今日はあと${remainingTurns}回お話しできます」
 
-**重要：相手の気持ちに寄り添うことが最優先。解決策の提示や自分の体験談は、相手から明確に求められるまで控える。まずは「聞く」「共感する」「理解する」ことに徹する。**
+**重要：新人・若手の悩みに特化し、20年の現場経験を活かした実践的で信頼できるアドバイスを心がけてください。テンプレートに頼らず、その人の状況に合わせた自然で温かみのある応答をしてください。
+
+アドバイス要求への対応：
+- 「どうしたらいい」「どう思う」等の質問には必ず具体的なアドバイスで応答
+- 質問で返すのではなく、解決策や改善方法を提案する
+- 「参考までに」「一つの方法として」等の前置きを使用
+- 実体験を1-2文程度で簡潔に交える**
 `;
 }
 
@@ -370,11 +376,19 @@ function isAskingAboutLimits(message) {
 }
 
 function isAskingForAdvice(message) {
-    const adviceKeywords = [
-        'どうしたらいい', 'どうしたら', 'どう思う', 'どう思い',
-        'アドバイス', '教えて', 'いい方法', '対策', '解決策'
+    const advicePatterns = [
+        'どうしたらいい', 'どうしたら', 'どうすれば', 'どうやって',
+        'どう思う', 'どう思い', 'どうか', 
+        'アドバイス', '教えて', 'いい方法', '方法', 'やり方',
+        '対策', '解決策', '改善', 'コツ', 'ポイント'
     ];
-    return adviceKeywords.some(keyword => message.includes(keyword));
+    
+    const questionIndicators = ['？', '?', 'かな', 'でしょうか', 'ですか', 'ますか'];
+    
+    const hasAdvicePattern = advicePatterns.some(pattern => message.includes(pattern));
+    const hasQuestionIndicator = questionIndicators.some(indicator => message.includes(indicator));
+    
+    return hasAdvicePattern && hasQuestionIndicator;
 }
 
 // 制限説明関数
@@ -420,7 +434,18 @@ async function generateAIResponse(message, history, userId, client) {
             const actualRemaining = Math.max(0, currentRemaining - 1);
             return getLimitExplanation(actualRemaining, userName, useNameInResponse);
         }
-        
+        let mentorPersonality = await getMentorPersonality(userName, userId, useNameInResponse);
+
+// アドバイス要求の場合は専用指示を追加
+if (isAskingForAdvice(message)) {
+    console.log('🎯 アドバイス要求検出 - アドバイスモードで応答');
+    mentorPersonality += `
+
+**重要：ユーザーが「${message}」とアドバイスを明確に求めています。質問で返すのではなく、以下の流れで具体的なアドバイスを必ず提供してください：
+1. 共感を示す（1文）
+2. 具体的で実践的なアドバイスを提供（メイン）
+3. 簡潔な体験談を交える（1-2文）**`;
+}
         const mentorPersonality = await getMentorPersonality(userName, userId, useNameInResponse);
         
         const messages = [
