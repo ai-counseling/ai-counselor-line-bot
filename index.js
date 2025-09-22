@@ -337,6 +337,8 @@ async function getMentorPersonality(userName, userId, useNameInResponse) {
 - 150文字程度で簡潔に、でも心のこもった返答
 - 相手の話に真摯に向き合う姿勢
 - 質問は1つに絞る（複数の質問で相手を圧迫しない）
+- 適度な感情表現：「お辛い状況ですね。。」「大変でしたね。。」等、「。」を2つ使って感情を込める（頻度は控えめに）
+- 読みやすさ重視：長い文章は適宜改行を入れて読みやすくする
 
 【対応方針】
 - **傾聴重視**: まずは相手の話を最後まで聞く
@@ -476,11 +478,17 @@ if (isAskingForAdvice(message)) {
         let aiResponse = response.choices[0].message.content;
         
         if (aiResponse && !aiResponse.match(/[。！？]$/)) {
-            const sentences = aiResponse.split(/[。！？]/);
-            if (sentences.length > 1) {
-                sentences.pop();
-                aiResponse = sentences.join('。') + '。';
-            }
+    const sentences = aiResponse.split(/[。！？]/);
+    if (sentences.length > 1) {
+        sentences.pop();
+        aiResponse = sentences.join('。') + '。';
+    }
+}
+
+// 読みやすさのための改行挿入
+if (aiResponse.length > 100) {
+    aiResponse = aiResponse.replace(/。\s*([^。]{50,})/g, '。\n\n$1');
+}
         }
         
         console.log(`AI応答生成完了: レスポンス長=${aiResponse.length}文字`);
